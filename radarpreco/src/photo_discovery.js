@@ -25,7 +25,7 @@ function apply(name){const p=cache.get(normalize(name));if(!p)return;for(const c
  }
  const title=document.querySelector('#detail .r6-head h2'),area=document.querySelector('#detail .r6-image');
  if(title&&area&&normalize(title.textContent)===normalize(name)&&!area.querySelector('img')){
- const img=document.createElement('img');img.src=p.url;img.alt='Foto do produto '+name;img.referrerPolicy='no-referrer';img.onerror=()=>img.remove();area.appendChild(img);
+ const img=document.createElement('img');img.src=p.url;img.alt='Foto do produto '+name;img.referrerPolicy='no-referrer';img.onerror=()=>img.remove();area.appendChild(img);const subtitle=document.querySelector('#detail .r6-sub');if(subtitle){subtitle.textContent='Imagem de acervo licenciado • ';const credit=document.createElement('a');credit.href=p.source;credit.target='_blank';credit.rel='noopener noreferrer';credit.className='r11-photo-credit';credit.textContent='Foto: '+p.author+' • '+p.license+' (ver origem)';subtitle.appendChild(credit)}
  }
 }
 const textOf=s=>{const e=document.createElement('span');e.innerHTML=String(s||'').slice(0,450);return e.textContent.trim().slice(0,100)};
@@ -43,10 +43,10 @@ async function openverse(name){const p=new URLSearchParams({q:name,page_size:'8'
  if(valid(row.thumbnail)&&valid(row.foreign_landing_url))return {url:row.thumbnail,source:row.foreign_landing_url,author:String(row.creator||'autor na fonte').slice(0,100),license:String(row.license||'ver licença').slice(0,40),provider:'Openverse'};
  }return null;
 }
-function schedule(){if(timer||!queue.length||running>=2||count>=24)return;timer=setTimeout(()=>{timer=null;drain()},Math.max(0,1000-(Date.now()-lastStart)))}
-function drain(){if(running>=2||!queue.length||count>=24)return;const name=queue.shift(),key=normalize(name);pending.delete(key);count++;running++;lastStart=Date.now();
+function schedule(){if(timer||!queue.length||running>=2||count>=60)return;timer=setTimeout(()=>{timer=null;drain()},Math.max(0,1000-(Date.now()-lastStart)))}
+function drain(){if(running>=2||!queue.length||count>=60)return;const name=queue.shift(),key=normalize(name);pending.delete(key);count++;running++;lastStart=Date.now();
  (async()=>{const p=await commons(name)||await openverse(name);if(p){cache.set(key,{...p,exp:Date.now()+30*DAY});persist();apply(name)}else{miss.set(key,Date.now()+3*DAY);persist()}})().catch(()=>{miss.set(key,Date.now()+3600000)}).finally(()=>{running--;schedule()});schedule();}
-function enqueue(name){const key=normalize(name);if(!key||cache.has(key)||pending.has(key)||miss.get(key)>Date.now()||count+queue.length>=24)return;
+function enqueue(name){const key=normalize(name);if(!key||cache.has(key)||pending.has(key)||miss.get(key)>Date.now()||count+queue.length>=60)return;
  const card=[...list.querySelectorAll('button.entry[data-name]')].find(x=>normalize(x.dataset.name)===key);if(!card||card.querySelector('.entry-thumb img'))return;
  pending.add(key);queue.push(name);schedule();}
 const observe='IntersectionObserver' in window?new IntersectionObserver(entries=>{for(const item of entries)if(item.isIntersecting){observe.unobserve(item.target);enqueue(item.target.dataset.name)}},{root:list,rootMargin:'65px'}):null;
