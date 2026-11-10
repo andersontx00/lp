@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import providers
 import alerts_engine
+import accounts, variant_rules, pg_store
 ROOT=Path(__file__).resolve().parent
 
 
@@ -42,7 +43,11 @@ CACHE_SECONDS=max(180,int(os.environ.get('CACHE_SECONDS','3600')))
 MAX_LOOKUPS_PER_DAY=max(1,int(os.environ.get('MAX_LOOKUPS_PER_DAY','20')))
 MAX_LOOKUPS_PER_MONTH=max(1,int(os.environ.get('MAX_LOOKUPS_PER_MONTH','200')))
 DB_PATH=Path(os.environ.get('RADAR_DB_PATH',str(ROOT/'radar_historico.sqlite3')))
+DATABASE_URL=os.environ.get('DATABASE_URL','').strip()
+USE_POSTGRES=bool(DATABASE_URL)
 lock=threading.RLock(); last_fetch={}; requests_per_min=deque(maxlen=50)
+auth_attempts={}
+
 
 def timestamp():return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -93,7 +98,7 @@ def words(raw):
 def match_score(wanted,candidate):
     """Match title identity, required model and capacity; never cross FE/Ultra or 128/256GB."""
     a=words(wanted);b=words(candidate)
-    if not a or not b:return 0.0
+    if not a or not b or variant_rules.incompatible(wanted,candidate):return 0.0
     sa,sb=set(a),set(b)
     # Every model number in the requested query must be present (accept 220 V / 220V).
     required=[t for t in a if re.search(r'\d',t)]
@@ -113,6 +118,17 @@ def match_score(wanted,candidate):
     if not use:use=a
     # For generic searches, exact model digits + matching key terms give a good match.
     return sum(t in sb for t in use)/len(use)
+
+def shipping_cost(row):
+    """None means shipping cost unknown. Zero only if clearly advertised free."""
+    raw=row.get('shipping') or row.get('delivery') or row.get('shipping_cost')
+    if isinstance(raw,dict):raw=raw.get('price') or raw.get('cost') or raw.get('label')
+    if isinstance(raw,(int,float)):return numeric_price(raw) if raw!=0 else 0.0
+    if not raw:return None
+    val=normalize(str(raw))
+    if any(x in val for x in ('frete gratis','frete gratuito','free shipping','entrega gratis')):return 0.0
+    if 'r$' not in str(raw).lower():return None
+    return numeric_price(str(raw))
 
 def extract_offers(response,wanted):
     """Read Shopping formats; keep photos and validate prices/product variants."""
@@ -140,7 +156,7 @@ def extract_offers(response,wanted):
         key=(normalize(title),normalize(source),price)
         if key in seen:continue
         seen.add(key)
-        arr.append({'title':title,'price':price,'source':source,'url':url,'image_url':thumb,
+        arr.append({'title':title,'price':price,'source':source,'url':url,'image_url':thumb,'shipping_price':shipping_cost(row),
             'product_id':str(row.get('product_id') or '')[:60],
             'checked_at':timestamp(),'match_score':round(score,3)})
     arr.sort(key=lambda x:x['price'])
@@ -232,8 +248,11 @@ def load_keepa_history(name,key=None,fetch=None):
 
 @contextmanager
 def db_conn():
-    cn=sqlite3.connect(DB_PATH,timeout=15)
-    cn.row_factory=sqlite3.Row
+    if USE_POSTGRES:
+        cn=pg_store.connect(DATABASE_URL)
+    else:
+        cn=sqlite3.connect(DB_PATH,timeout=15)
+        cn.row_factory=sqlite3.Row
     try:
         with cn:
             yield cn
@@ -241,6 +260,12 @@ def db_conn():
         cn.close()
 
 def initialize():
+    if USE_POSTGRES:
+        with lock,db_conn() as cn:
+            pg_store.initialize(cn)
+            alerts_engine.init_schema(cn,postgres=True)
+            accounts.init_schema(cn,postgres=True)
+        return
     with lock,db_conn() as cn:
         cn.execute('''CREATE TABLE IF NOT EXISTS prices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,7 +287,12 @@ def initialize():
         cn.execute('''CREATE TABLE IF NOT EXISTS lookup_quota (
           id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, product TEXT NOT NULL)''')
         cn.execute('CREATE INDEX IF NOT EXISTS lookup_quota_at ON lookup_quota(at)')
+        if 'client_key' not in {r[1] for r in cn.execute('PRAGMA table_info(lookup_quota)').fetchall()}:
+            cn.execute("ALTER TABLE lookup_quota ADD COLUMN client_key TEXT NOT NULL DEFAULT ''")
         alerts_engine.init_schema(cn)
+        accounts.init_schema(cn)
+        if 'shipping_price' not in {r[1] for r in cn.execute('PRAGMA table_info(offers)').fetchall()}:
+            cn.execute('ALTER TABLE offers ADD COLUMN shipping_price REAL')
 
 def store_offer_cache(name, items, at=None):
     """Keep only offers observed together, one lowest listing per merchant."""
@@ -278,14 +308,14 @@ def store_offer_cache(name, items, at=None):
     with lock,db_conn() as cn:
         cn.execute('DELETE FROM offers WHERE product=?',(name,))
         for item in grouped.values():
-            cn.execute('INSERT INTO offers(product,merchant,title,price,url,checked_at,image_url,provider) VALUES (?,?,?,?,?,?,?,?)',
-                (name,item['source'],str(item.get('title',''))[:200],item['price'],safe_url(item.get('url')),str(item.get('checked_at') or stamp),image_url(item.get('image_url')),str(item.get('provider') or 'serpapi')[:30]))
+            cn.execute('INSERT INTO offers(product,merchant,title,price,url,checked_at,image_url,provider,shipping_price) VALUES (?,?,?,?,?,?,?,?,?)',
+                (name,item['source'],str(item.get('title',''))[:200],item['price'],safe_url(item.get('url')),str(item.get('checked_at') or stamp),image_url(item.get('image_url')),str(item.get('provider') or 'serpapi')[:30],item.get('shipping_price')))
     return list(sorted(grouped.values(),key=lambda x:x['price']))
 
 
 def read_offers(name):
     with lock,db_conn() as cn:
-        rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider FROM offers WHERE product=? ORDER BY price ASC LIMIT 50',(name,)).fetchall()
+        rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price FROM offers WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -316,7 +346,7 @@ def read_history(name,days=7):
     with lock,db_conn() as cn:
         insight=alerts_engine.opportunity(cn,name,offers)
     return {'query':name,'days':days,'points':[dict(row) for row in rows],'insight':insight,
-           'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),'')}
+           'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),'')}
 
 def job_get(name):
     with lock, db_conn() as cn:
@@ -377,7 +407,7 @@ def poll_bright(name):
         return ('ready',offers)
     return (state,[])
 
-def enforce_lookup_quota(name):
+def enforce_lookup_quota(name,owner='anonymous'):
     # Every *new search* is counted; background polling is not.
     utc=datetime.now(timezone.utc)
     day=utc.date().isoformat()
@@ -387,9 +417,12 @@ def enforce_lookup_quota(name):
         n_month=cn.execute('SELECT COUNT(*) FROM lookup_quota WHERE at>=?',(month+'-01',)).fetchone()[0]
         if n_day>=MAX_LOOKUPS_PER_DAY or n_month>=MAX_LOOKUPS_PER_MONTH:
             raise ValueError('Limite preventivo de consultas atingido. Tente mais tarde.')
-        cn.execute('INSERT INTO lookup_quota(at,product) VALUES (?,?)',(timestamp(),name))
+        n_user=cn.execute('SELECT COUNT(*) FROM lookup_quota WHERE client_key=? AND at>=?',(owner,day)).fetchone()[0]
+        if n_user>=6 and owner!='automatic':
+            raise ValueError('Limite diário deste acesso atingido. Tente amanhã.')
+        cn.execute('INSERT INTO lookup_quota(at,product,client_key) VALUES (?,?,?)',(timestamp(),name,owner))
 
-def perform_refresh(name):
+def perform_refresh(name,owner='anonymous'):
     """One product request triggers Bright Data and Mercado Livre independently.
 
     Bright Data is an async dataset job; frontend polls /api/refresh at least
@@ -425,6 +458,13 @@ def perform_refresh(name):
             out['sources'].append({'name':'Bright Data','status':'retry'})
             out['errors'].append('Bright Data: aguardando nova tentativa.')
         return out
+    fresh=read_offers(name)
+    if fresh:
+        try:
+            age=(datetime.now(timezone.utc)-datetime.fromisoformat(max(x['checked_at'] for x in fresh))).total_seconds()
+            if 0<=age<CACHE_SECONDS:
+                out['cached']=True;out['sources'].append({'name':'Cache','status':'recent'});return out
+        except (ValueError,TypeError):pass
     with lock:
         stamp=last_fetch.get(name.casefold())
         cached_offers=read_offers(name)
@@ -436,7 +476,7 @@ def perform_refresh(name):
             return out
         while requests_per_min and now-requests_per_min[0]>60:requests_per_min.popleft()
         if len(requests_per_min)>=10:raise ValueError('Limite de 10 pesquisas novas por minuto atingido.')
-        enforce_lookup_quota(name)
+        enforce_lookup_quota(name,owner)
         requests_per_min.append(now)
         last_fetch[name.casefold()]=now
 
@@ -483,14 +523,86 @@ def perform_refresh(name):
         with lock:last_fetch[name.casefold()]=now-CACHE_SECONDS+120
     return out
 
+def highlights(limit=12):
+    """Genuine fresh observations only. No fabricated product prices."""
+    cutoff=(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds')
+    with lock,db_conn() as cn:
+        rows=cn.execute('''SELECT product,merchant,price,checked_at,image_url,url,shipping_price
+          FROM offers WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 300''',(cutoff,)).fetchall()
+    found={}
+    for row in rows:
+        data=dict(row);name=data['product']
+        if name not in found or data['price']<found[name]['price']:found[name]=data
+    return sorted(found.values(),key=lambda o:o['price'])[:limit]
+
 class Handler(BaseHTTPRequestHandler):
-    server_version='RadarPreco/8.0'
+    server_version='RadarPreco/9.0'
     def log_message(self,fmt,*args):pass # prevent query/key logging
+    def client_session(self):
+        import http.cookies
+        cookies=http.cookies.SimpleCookie()
+        try:cookies.load(self.headers.get('Cookie',''))
+        except Exception:return (None,None)
+        token=cookies.get('radar_session')
+        secret=token.value if token else None
+        if not secret:return (None,None)
+        with lock,db_conn() as cn:user=accounts.who(cn,secret)
+        return (user,secret)
+
+    def safe_origin(self):
+        origin=self.headers.get('Origin')
+        if not origin:return self.headers.get('Sec-Fetch-Site','') not in ('cross-site','same-site')
+        try:
+            p=urlsplit(origin)
+            host=(self.headers.get('X-Forwarded-Host') or self.headers.get('Host') or '').split(':')[0].lower()
+            return (p.scheme in ('http','https') and p.hostname==host)
+        except ValueError:return False
+
+    def auth_throttle(self):
+        # 8 login attempts per IP per 10 minutes; memory-only additional protection.
+        address=self.client_address[0]
+        now=time.monotonic()
+        with lock:
+            a=auth_attempts.get(address,[])
+            a=[t for t in a if now-t<600]
+            if len(a)>=8:raise ValueError('Muitas tentativas. Volte mais tarde.')
+            a.append(now);auth_attempts[address]=a
+
+    def set_session_cookie(self,secret):
+        import http.cookies
+        cookie=http.cookies.SimpleCookie()
+        cookie['radar_session']=secret or ''
+        cookie['radar_session']['path']='/'
+        cookie['radar_session']['httponly']=True
+        cookie['radar_session']['samesite']='Lax'
+        if os.environ.get('HOST','')!='127.0.0.1' and self.headers.get('X-Forwarded-Proto','https')=='https':
+            cookie['radar_session']['secure']=True
+        cookie['radar_session']['max-age']=accounts.SESSION_SECONDS if secret else 0
+        self._session_cookie=cookie.output(header='').strip()
+
+    def auth_result(self,user,secret):
+        return {'user':user,'csrf':accounts.csrf(secret),'favorites':accounts.favorites(self._auth_cn,user['id'])}
+
+    def request_json(self,max_size=4096):
+        if self.headers.get('Content-Type','').split(';')[0].strip().lower()!='application/json':
+            raise ValueError('JSON obrigatório.')
+        size=int(self.headers.get('Content-Length','0'))
+        if size<2 or size>max_size:raise ValueError('Tamanho da requisição inválido.')
+        data=json.loads(self.rfile.read(size))
+        if not isinstance(data,dict):raise ValueError('Objeto JSON inválido.')
+        return data
+
+    def session_owner(self):
+        user,secret=self.client_session()
+        if user:return 'account:'+str(user['id'])
+        return alerts_engine.device_key(self.headers.get('X-Radar-Device'))
+
     def respond(self,obj,status=200):
         raw=json.dumps(obj,ensure_ascii=False,separators=(',',':')).encode('utf-8')
         self.send_response(status)
-        for k,v in [('Content-Type','application/json; charset=utf-8'),('Cache-Control','no-store'),
+        for k,v in [('Content-Type','application/json; charset=utf-8'),('Cache-Control','no-store'),('Referrer-Policy','strict-origin-when-cross-origin'),('X-Frame-Options','DENY'),('Permissions-Policy','camera=(), microphone=()'),
                     ('X-Content-Type-Options','nosniff'),('Content-Length',str(len(raw)))]:self.send_header(k,v)
+        if getattr(self,'_session_cookie',None):self.send_header('Set-Cookie',self._session_cookie)
         self.end_headers();self.wfile.write(raw)
     def do_GET(self):
         path=urlsplit(self.path)
@@ -499,19 +611,44 @@ class Handler(BaseHTTPRequestHandler):
         if path.path in ('/','/index.html'):
             data=(ROOT/'index.html').read_bytes()
             self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8')
-            self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            self.send_header('Content-Length',str(len(data)));self.send_header('X-Content-Type-Options','nosniff');self.send_header('Referrer-Policy','strict-origin-when-cross-origin');self.end_headers();self.wfile.write(data);return
         if path.path=='/api/watch':
             try:
-                device=alerts_engine.device_key(self.headers.get('X-Radar-Device'))
+                device=self.session_owner()
                 with lock,db_conn() as cn: state=alerts_engine.watch_state(cn,device)
                 self.respond(state)
             except ValueError as e:self.respond({'error':str(e)},400)
             return
+        if path.path=='/api/me':
+            user,secret=self.client_session()
+            if user:
+                with lock,db_conn() as cn:saved=accounts.favorites(cn,user['id'])
+                self.respond({'user':user,'csrf':accounts.csrf(secret),'favorites':saved})
+            else:self.respond({'user':None,'favorites':[]})
+            return
+        if path.path=='/api/favorites':
+            user,_=self.client_session()
+            if not user:self.respond({'error':'Faça login para sincronizar favoritos.'},401);return
+            with lock,db_conn() as cn:saved=accounts.favorites(cn,user['id'])
+            self.respond({'favorites':saved});return
+        if path.path=='/api/highlights':
+            self.respond({'offers':highlights(),'note':'Somente ofertas realmente verificadas nas últimas 24 horas.'});return
+        if path.path=='/favicon.svg' or path.path in ('/icon-192.png','/icon-512.png'):
+            file=ROOT/path.path.lstrip('/')
+            raw=file.read_bytes()
+            mime='image/svg+xml' if path.path.endswith('.svg') else 'image/png'
+            self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
+        if path.path=='/manifest.webmanifest':
+            raw=(ROOT/'manifest.webmanifest').read_bytes()
+            self.send_response(200);self.send_header('Content-Type','application/manifest+json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
+        if path.path=='/sw.js':
+            raw=(ROOT/'sw.js').read_bytes()
+            self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Service-Worker-Allowed','/');self.send_header('Cache-Control','no-cache');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
         if path.path=='/api/status':
-            self.respond({'version':'8.0','smoke_test':dict(smoke_state),'connected':configured(),
+            self.respond({'version':'9.0','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
-             'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,
+             'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','auth':'email_password',
              'historical_google':bool(SERPAPI_KEY),'historical_amazon':bool(KEEPA_KEY),
              'history_note':'Histórico anterior depende de cobertura do provedor. Não são gerados preços simulados.'});return
         if path.path=='/api/history':
@@ -522,11 +659,53 @@ class Handler(BaseHTTPRequestHandler):
         self.respond({'error':'Rota inexistente'},404)
     def do_POST(self):
         path=urlsplit(self.path)
+        if not self.safe_origin():self.respond({'error':'Origem não autorizada.'},403);return
+        if path.path in ('/api/auth/register','/api/auth/login','/api/auth/logout','/api/auth/migrate_watch','/api/favorites'):
+            try:
+                body=self.request_json(10000)
+                user,secret=self.client_session()
+                if path.path in ('/api/auth/register','/api/auth/login'):
+                    self.auth_throttle()
+                    with lock,db_conn() as cn:
+                        if path.path.endswith('register'):
+                            user=accounts.register(cn,body.get('email'),body.get('password'))
+                        else:user=accounts.login(cn,body.get('email'),body.get('password'))
+                        token=accounts.new_session(cn,user)
+                        favs=accounts.favorites(cn,user['id'])
+                    self.set_session_cookie(token)
+                    self.respond({'user':user,'csrf':accounts.csrf(token),'favorites':favs});return
+                if not user or not accounts.check_csrf(secret,self.headers.get('X-Radar-CSRF')):
+                    self.respond({'error':'Sessão inválida ou proteção CSRF ausente.'},403);return
+                if path.path.endswith('migrate_watch'):
+                    old_device=alerts_engine.device_key(body.get('device'))
+                    new_device='account:'+str(user['id'])
+                    with lock,db_conn() as cn:
+                        old=cn.execute('SELECT product,threshold,created_at FROM watches WHERE device=? LIMIT 30',(old_device,)).fetchall()
+                        existing=cn.execute('SELECT COUNT(*) FROM watches WHERE device=?',(new_device,)).fetchone()[0]
+                        for w in old[:max(0,30-existing)]:
+                            cn.execute('INSERT OR IGNORE INTO watches(device,product,threshold,created_at,last_auto_at) VALUES(?,?,?,?,?)',
+                                       (new_device,w['product'],w['threshold'],w['created_at'],''))
+                    self.respond({'imported':len(old)});return
+                if path.path.endswith('logout'):
+                    with lock,db_conn() as cn:accounts.logout(cn,secret)
+                    self.set_session_cookie(None)
+                    self.respond({'user':None,'favorites':[]});return
+                with lock,db_conn() as cn:
+                    favs=accounts.save_favorites(cn,user['id'],body.get('favorites',[]))
+                self.respond({'favorites':favs});return
+            except (ValueError,TypeError,json.JSONDecodeError) as exc:
+                self.respond({'error':str(exc) if isinstance(exc,ValueError) else 'Dados inválidos.'},400);return
+            except Exception as exc:
+                # Do not reveal database and user details.
+                self.respond({'error':'Operação indisponível. Tente novamente.'},503);return
         if path.path=='/api/watch':
+            user,secret=self.client_session()
+            if user and not accounts.check_csrf(secret,self.headers.get('X-Radar-CSRF')):
+                self.respond({'error':'Proteção de sessão inválida.'},403);return
             if self.headers.get('Content-Type','').split(';')[0].strip().lower()!='application/json':
                 self.respond({'error':'JSON obrigatório.'},415);return
             try:
-                device=alerts_engine.device_key(self.headers.get('X-Radar-Device'))
+                device=self.session_owner()
                 length=int(self.headers.get('Content-Length','0'))
                 if not 2<=length<=800:raise ValueError('Corpo inválido.')
                 body=json.loads(self.rfile.read(length))
@@ -553,15 +732,17 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError,TypeError,AttributeError,json.JSONDecodeError) as e:
             self.respond({'error':'Nome do produto inválido.'},400);return
         try:
-            result=perform_refresh(name)
+            user,_=self.client_session()
+            owner='user:'+str(user['id']) if user else 'guest:'+str(self.client_address[0])
+            result=perform_refresh(name,owner)
             result['history']=read_history(name,'365')
             self.respond(result)
         except ValueError as e:self.respond({'error':str(e)},429)
         except Exception:self.respond({'error':'Falha ao consultar a fonte. Tente novamente.'},502)
 
 def automatic_watch_loop():
-    # Best-effort scheduler on a free sleeping service. Cap background
-    # lookups at 2/day, keeping credits for searches initiated by users.
+    # Best-effort scheduler on a free sleeping service. Limit reserved
+    # background lookups to 2/day, leaving the rest of the API budget to users.
     daily_day=''
     completed=0
     while True:
@@ -576,10 +757,13 @@ def automatic_watch_loop():
                 if name:alerts_engine.mark_scanned(cn,name,timestamp())
             if not name:continue
             completed+=1
-            result=perform_refresh(name)
+            result=perform_refresh(name,'automatic')
             print('AUTO_WATCH status=%s' % ('ok' if result.get('offers') else 'no_offers'),flush=True)
-        except ValueError:completed=2
-        except Exception as exc:print('AUTO_WATCH error_type=%s' % type(exc).__name__,flush=True)
+        except ValueError:
+            # Quota reached; do not retry until tomorrow.
+            completed=2
+        except Exception as exc:
+            print('AUTO_WATCH error_type=%s' % type(exc).__name__,flush=True)
 
 smoke_state={'status':'not_requested','offers':0,'checked_at':None}
 
@@ -601,7 +785,7 @@ def run_smoke_query():
 
 def main():
     initialize();app=ThreadingHTTPServer((HOST,PORT),Handler)
-    print('RadarPreço 8.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
+    print('RadarPreço 9.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
     threading.Thread(target=automatic_watch_loop,daemon=True).start()
     if os.environ.get('RADAR_SMOKE_QUERY','').strip():
         threading.Thread(target=run_smoke_query,daemon=True).start()

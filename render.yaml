@@ -1,0 +1,34 @@
+# REVIEW BEFORE APPLYING: this Blueprint adopts two EXISTING free Render resources.
+# Existing SerpApi environment variables remain untouched.
+services:
+  - type: web
+    name: radarpreco-anderson-web
+    runtime: python
+    plan: free
+    region: virginia
+    repo: https://github.com/andersontx00/lp
+    branch: main
+    buildCommand: python -m pip install -r radarpreco/requirements.txt && python -m compileall -q radarpreco/src
+    startCommand: python radarpreco/src/server.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: CACHE_SECONDS
+        value: "21600"
+      - key: MAX_LOOKUPS_PER_DAY
+        value: "12"
+      - key: MAX_LOOKUPS_PER_MONTH
+        value: "100"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: radarpreco-testes-db
+          property: connectionString
+
+databases:
+  - name: radarpreco-testes-db
+    databaseName: radarpreco_testes_db
+    user: radarpreco_testes_db_user
+    plan: free
+    region: virginia
+    postgresMajorVersion: "17"
+    ipAllowList: []
