@@ -329,13 +329,13 @@ async function refreshProduct(name,ticket=viewToken){
 }
 
 function exportCSV(){const rows=[['Produto','Preço (R$)','Fonte','Data','Link']];Object.entries(persist.observations).forEach(([name,ob])=>ob.forEach(o=>rows.push([name,o.price,o.source,o.at,o.url||''])));const csv='\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(';')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='radarpreco_historico.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
-$('categories').addEventListener('click',e=>{const b=e.target.closest('[data-cat]');if(!b)return;cat=b.dataset.cat;subcat='Todas';term='';$('q').value='';onlySaved=false;limit=45;const first=allFiltered()[0];if(first)choose(first.name);else render()});
-$('subtabs').addEventListener('click',e=>{const b=e.target.closest('[data-sub]');if(!b)return;subcat=b.dataset.sub;limit=45;const first=allFiltered()[0];if(first)choose(first.name);else render()});
+$('categories').addEventListener('click',e=>{const b=e.target.closest('[data-cat]');if(!b)return;cat=b.dataset.cat;subcat='Todas';term='';$('q').value='';onlySaved=false;limit=45;render()});
+$('subtabs').addEventListener('click',e=>{const b=e.target.closest('[data-sub]');if(!b)return;subcat=b.dataset.sub;limit=45;render()});
 $('list').addEventListener('click',e=>{const b=e.target.closest('[data-name]');if(b)choose(b.dataset.name)});
 $('more').addEventListener('click',()=>{limit+=45;renderList()});
 $('searchNow').addEventListener('click',e=>{e.preventDefault();const q=$('q').value.trim();if(!q){e.preventDefault();toast('Escreva o que quer pesquisar.');return;}ensureSearch();const x=uniqAll().find(p=>norm(p.name)===norm(q));if(!x&&!allFiltered().length){createCustom(q);render()}updateSearchUrl()});
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('searchNow').click()}});
-$('q').addEventListener('input',e=>{updateSearchUrl();term=e.target.value.trim();cat='Todos';subcat='Todas';onlySaved=false;limit=45;const first=allFiltered()[0];if(first)choose(first.name);else if(term)choose(term);else render()});
+$('q').addEventListener('input',e=>{updateSearchUrl();term=e.target.value.trim();cat='Todos';subcat='Todas';onlySaved=false;limit=45;renderCats();renderSubs();renderList();renderStats()});
 $('quick').innerHTML=['Logitech G305','Lava-louças 10 serviços','Civic manual 2015','Olympikus Corre 5','RTX 5070','Ar-condicionado 12000 BTUs'].map(q=>`<button class="quickchip" data-quick="${esc(q)}">${esc(q)}</button>`).join('');
 $('quick').addEventListener('click',e=>{const b=e.target.closest('[data-quick]');if(!b)return;$('q').value=b.dataset.quick;updateSearchUrl();ensureSearch()});
 $('savedBtn').addEventListener('click',()=>{onlySaved=true;cat='Todos';subcat='Todas';term='';$('q').value='';limit=45;selection=allFiltered()[0]?.name||selection;choose(selection)});
