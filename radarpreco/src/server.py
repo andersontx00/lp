@@ -558,7 +558,7 @@ def highlights(limit=12):
     return sorted(found.values(),key=lambda o:o['price'])[:limit]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='RadarPreco/10.0'
+    server_version='RadarPreco/10.1'
     def log_message(self,fmt,*args):pass # prevent query/key logging
     def client_session(self):
         import http.cookies
@@ -662,6 +662,12 @@ class Handler(BaseHTTPRequestHandler):
             raw=file.read_bytes()
             mime='image/svg+xml' if path.path.endswith('.svg') else 'image/png'
             self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
+        if path.path=='/photo-discovery.js':
+            raw=(ROOT/'photo_discovery.js').read_bytes()
+            self.send_response(200);self.send_header('Content-Type','text/javascript; charset=utf-8')
+            self.send_header('Cache-Control','public, max-age=3600')
+            self.send_header('X-Content-Type-Options','nosniff')
+            self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
         if path.path=='/manifest.webmanifest':
             raw=(ROOT/'manifest.webmanifest').read_bytes()
             self.send_response(200);self.send_header('Content-Type','application/manifest+json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
@@ -669,7 +675,7 @@ class Handler(BaseHTTPRequestHandler):
             raw=(ROOT/'sw.js').read_bytes()
             self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Service-Worker-Allowed','/');self.send_header('Cache-Control','no-cache');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
         if path.path=='/api/status':
-            self.respond({'version':'10.0','smoke_test':dict(smoke_state),'connected':configured(),
+            self.respond({'version':'10.1','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
              'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','auth':'email_password',
