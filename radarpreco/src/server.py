@@ -18,6 +18,7 @@ from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import providers
+import alerts_engine
 ROOT=Path(__file__).resolve().parent
 
 
@@ -261,6 +262,7 @@ def initialize():
         cn.execute('''CREATE TABLE IF NOT EXISTS lookup_quota (
           id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, product TEXT NOT NULL)''')
         cn.execute('CREATE INDEX IF NOT EXISTS lookup_quota_at ON lookup_quota(at)')
+        alerts_engine.init_schema(cn)
 
 def store_offer_cache(name, items, at=None):
     """Keep only offers observed together, one lowest listing per merchant."""
@@ -311,7 +313,9 @@ def read_history(name,days=7):
              WHERE product=? AND kind='snapshot' AND at=(SELECT MAX(at) FROM prices WHERE product=? AND kind='snapshot')
              ORDER BY price ASC LIMIT 1''',(name,name)).fetchone()
     offers=read_offers(name)
-    return {'query':name,'days':days,'points':[dict(row) for row in rows],
+    with lock,db_conn() as cn:
+        insight=alerts_engine.opportunity(cn,name,offers)
+    return {'query':name,'days':days,'points':[dict(row) for row in rows],'insight':insight,
            'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),'')}
 
 def job_get(name):
@@ -341,6 +345,8 @@ def record_merged(name,new_offers,stamp=None):
     refreshed={normalize(str(o.get('source') or '')) for o in new_offers}
     remaining=[o for o in old if normalize(str(o.get('source') or '')) not in refreshed]
     merged=store_offer_cache(name,remaining+new_offers,stamp)
+    with lock,db_conn() as cn:
+        alerts_engine.store_drop_alerts(cn,name,new_offers,stamp)
     store_points(name,[{'series':'Loja • '+o['source'],'price':o['price'],'at':str(o.get('checked_at') or stamp),
           'source':str(o.get('provider') or o['source']),'url':o['url'],'kind':'snapshot'}
           for o in new_offers if o.get('price')])
@@ -421,7 +427,10 @@ def perform_refresh(name):
         return out
     with lock:
         stamp=last_fetch.get(name.casefold())
-        if stamp and now-stamp<CACHE_SECONDS:
+        cached_offers=read_offers(name)
+        recent=[alerts_engine.parse_at(x.get('checked_at')) for x in cached_offers]
+        newest=max((x for x in recent if x is not None),default=None)
+        if (stamp and now-stamp<CACHE_SECONDS) or (newest and datetime.now(timezone.utc)-newest<timedelta(seconds=CACHE_SECONDS)):
             out['cached']=True
             out['sources'].append({'name':'Cache','status':'recent'})
             return out
@@ -475,7 +484,7 @@ def perform_refresh(name):
     return out
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='RadarPreco/7.0'
+    server_version='RadarPreco/8.0'
     def log_message(self,fmt,*args):pass # prevent query/key logging
     def respond(self,obj,status=200):
         raw=json.dumps(obj,ensure_ascii=False,separators=(',',':')).encode('utf-8')
@@ -491,11 +500,18 @@ class Handler(BaseHTTPRequestHandler):
             data=(ROOT/'index.html').read_bytes()
             self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8')
             self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+        if path.path=='/api/watch':
+            try:
+                device=alerts_engine.device_key(self.headers.get('X-Radar-Device'))
+                with lock,db_conn() as cn: state=alerts_engine.watch_state(cn,device)
+                self.respond(state)
+            except ValueError as e:self.respond({'error':str(e)},400)
+            return
         if path.path=='/api/status':
-            self.respond({'version':'7.0','smoke_test':dict(smoke_state),'connected':configured(),
+            self.respond({'version':'8.0','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
-             'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand','catalog_items':1000,
+             'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,
              'historical_google':bool(SERPAPI_KEY),'historical_amazon':bool(KEEPA_KEY),
              'history_note':'Histórico anterior depende de cobertura do provedor. Não são gerados preços simulados.'});return
         if path.path=='/api/history':
@@ -506,6 +522,26 @@ class Handler(BaseHTTPRequestHandler):
         self.respond({'error':'Rota inexistente'},404)
     def do_POST(self):
         path=urlsplit(self.path)
+        if path.path=='/api/watch':
+            if self.headers.get('Content-Type','').split(';')[0].strip().lower()!='application/json':
+                self.respond({'error':'JSON obrigatório.'},415);return
+            try:
+                device=alerts_engine.device_key(self.headers.get('X-Radar-Device'))
+                length=int(self.headers.get('Content-Length','0'))
+                if not 2<=length<=800:raise ValueError('Corpo inválido.')
+                body=json.loads(self.rfile.read(length))
+                action=str(body.get('action') or '').strip()
+                with lock,db_conn() as cn:
+                    if action=='read':
+                        alerts_engine.mark_read(cn,device,body.get('id','all'),timestamp())
+                    else:
+                        name=clean_query(body.get('product',''))
+                        alerts_engine.change_watch(cn,device,name,action,body.get('threshold',10),timestamp())
+                    state=alerts_engine.watch_state(cn,device)
+                self.respond(state)
+            except (ValueError,TypeError,KeyError,json.JSONDecodeError) as e:
+                self.respond({'error':str(e) if isinstance(e,ValueError) else 'Entrada inválida.'},400)
+            return
         if path.path!='/api/refresh':self.respond({'error':'Rota inexistente'},404);return
         if self.headers.get('Content-Type','').split(';')[0].strip().lower()!='application/json':
             self.respond({'error':'Conteúdo JSON obrigatório.'},415);return
@@ -522,6 +558,28 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(result)
         except ValueError as e:self.respond({'error':str(e)},429)
         except Exception:self.respond({'error':'Falha ao consultar a fonte. Tente novamente.'},502)
+
+def automatic_watch_loop():
+    # Best-effort scheduler on a free sleeping service. Cap background
+    # lookups at 2/day, keeping credits for searches initiated by users.
+    daily_day=''
+    completed=0
+    while True:
+        time.sleep(300)
+        if not configured():continue
+        day=datetime.now(timezone.utc).date().isoformat()
+        if day!=daily_day:daily_day=day;completed=0
+        if completed>=2:continue
+        try:
+            with lock,db_conn() as cn:
+                name=alerts_engine.next_due_product(cn)
+                if name:alerts_engine.mark_scanned(cn,name,timestamp())
+            if not name:continue
+            completed+=1
+            result=perform_refresh(name)
+            print('AUTO_WATCH status=%s' % ('ok' if result.get('offers') else 'no_offers'),flush=True)
+        except ValueError:completed=2
+        except Exception as exc:print('AUTO_WATCH error_type=%s' % type(exc).__name__,flush=True)
 
 smoke_state={'status':'not_requested','offers':0,'checked_at':None}
 
@@ -543,7 +601,8 @@ def run_smoke_query():
 
 def main():
     initialize();app=ThreadingHTTPServer((HOST,PORT),Handler)
-    print('RadarPreço 7.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
+    print('RadarPreço 8.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
+    threading.Thread(target=automatic_watch_loop,daemon=True).start()
     if os.environ.get('RADAR_SMOKE_QUERY','').strip():
         threading.Thread(target=run_smoke_query,daemon=True).start()
     try:app.serve_forever()
