@@ -15,6 +15,10 @@ class HybridRow(dict):
 
 
 def hybrid_row(cursor):
+    # Psycopg also invokes row factories for DDL and INSERT/UPDATE without RETURNING.
+    # Those operations have no result-column description.
+    if cursor.description is None:
+        return lambda values: HybridRow()
     names = [c.name for c in cursor.description]
     def make(values): return HybridRow(zip(names, values))
     return make
