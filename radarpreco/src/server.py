@@ -492,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8')
             self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
         if path.path=='/api/status':
-            self.respond({'version':'7.0','connected':configured(),
+            self.respond({'version':'7.0','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
              'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand','catalog_items':1000,
@@ -523,9 +523,29 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:self.respond({'error':str(e)},429)
         except Exception:self.respond({'error':'Falha ao consultar a fonte. Tente novamente.'},502)
 
+smoke_state={'status':'not_requested','offers':0,'checked_at':None}
+
+def run_smoke_query():
+    """One-off deployment smoke test; never print keys or full provider error URLs."""
+    raw=os.environ.get('RADAR_SMOKE_QUERY','').strip()
+    if not raw:return
+    smoke_state.update(status='checking',offers=0,checked_at=timestamp())
+    try:
+        name=clean_query(raw)
+        outcome=perform_refresh(name)
+        offers=outcome.get('offers') or []
+        state='ok' if offers else ('provider_unavailable' if outcome.get('errors') else 'no_matching_offers')
+        smoke_state.update(status=state,offers=len(offers),checked_at=timestamp())
+        print('RADAR_SMOKE status=%s offers=%d' % (state,len(offers)),flush=True)
+    except Exception as exc:
+        smoke_state.update(status='error',offers=0,checked_at=timestamp())
+        print('RADAR_SMOKE status=error category='+type(exc).__name__,flush=True)
+
 def main():
     initialize();app=ThreadingHTTPServer((HOST,PORT),Handler)
     print('RadarPreço 7.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
+    if os.environ.get('RADAR_SMOKE_QUERY','').strip():
+        threading.Thread(target=run_smoke_query,daemon=True).start()
     try:app.serve_forever()
     except KeyboardInterrupt:pass
     finally:app.server_close()
