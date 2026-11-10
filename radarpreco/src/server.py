@@ -523,6 +523,28 @@ def perform_refresh(name,owner='anonymous'):
         with lock:last_fetch[name.casefold()]=now-CACHE_SECONDS+120
     return out
 
+def catalog_cards(limit=450):
+    """Serve the best stored offers (and genuine photos) without provider/API charges."""
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat(timespec='seconds')
+    with lock,db_conn() as cn:
+        rows=cn.execute('''SELECT product,merchant,price,checked_at,image_url,shipping_price
+          FROM offers WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 2500''',(cutoff,)).fetchall()
+    found={}
+    for row in rows:
+        item=dict(row);name=item.get('product')
+        if not name or not numeric_price(item.get('price')):continue
+        existing=found.get(name)
+        if existing is None:
+            found[name]=item
+        elif float(item['price'])<float(existing['price']):
+            # Keep the verified product photo even if a cheaper listing lacks one.
+            if not item.get('image_url') and existing.get('image_url'):
+                item['image_url']=existing['image_url']
+            found[name]=item
+        elif not existing.get('image_url') and item.get('image_url'):
+            existing['image_url']=item['image_url']
+    return list(found.values())[:limit]
+
 def highlights(limit=12):
     """Genuine fresh observations only. No fabricated product prices."""
     cutoff=(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds')
@@ -536,7 +558,7 @@ def highlights(limit=12):
     return sorted(found.values(),key=lambda o:o['price'])[:limit]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='RadarPreco/9.0'
+    server_version='RadarPreco/10.0'
     def log_message(self,fmt,*args):pass # prevent query/key logging
     def client_session(self):
         import http.cookies
@@ -631,6 +653,8 @@ class Handler(BaseHTTPRequestHandler):
             if not user:self.respond({'error':'Faça login para sincronizar favoritos.'},401);return
             with lock,db_conn() as cn:saved=accounts.favorites(cn,user['id'])
             self.respond({'favorites':saved});return
+        if path.path=='/api/catalog-cards':
+            self.respond({'items':catalog_cards(),'source':'stored_verified_offers','no_billable_queries':True});return
         if path.path=='/api/highlights':
             self.respond({'offers':highlights(),'note':'Somente ofertas realmente verificadas nas últimas 24 horas.'});return
         if path.path=='/favicon.svg' or path.path in ('/icon-192.png','/icon-512.png'):
@@ -645,7 +669,7 @@ class Handler(BaseHTTPRequestHandler):
             raw=(ROOT/'sw.js').read_bytes()
             self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Service-Worker-Allowed','/');self.send_header('Cache-Control','no-cache');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
         if path.path=='/api/status':
-            self.respond({'version':'9.0','smoke_test':dict(smoke_state),'connected':configured(),
+            self.respond({'version':'10.0','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
              'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','auth':'email_password',
@@ -785,7 +809,7 @@ def run_smoke_query():
 
 def main():
     initialize();app=ThreadingHTTPServer((HOST,PORT),Handler)
-    print('RadarPreço 9.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
+    print('RadarPreço 10.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
     threading.Thread(target=automatic_watch_loop,daemon=True).start()
     if os.environ.get('RADAR_SMOKE_QUERY','').strip():
         threading.Thread(target=run_smoke_query,daemon=True).start()
