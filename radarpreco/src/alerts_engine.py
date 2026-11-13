@@ -8,7 +8,11 @@ from __future__ import annotations
 import hashlib
 import re
 import statistics
-from offer_quality import minimum_trusted_at
+from offer_quality import minimum_trusted_at as device_quality_cutoff
+from product_identity import minimum_trusted_at as model_quality_cutoff
+
+def minimum_trusted_at(name):
+    return max(filter(None,(device_quality_cutoff(name),model_quality_cutoff(name))),default=None)
 from datetime import datetime, timedelta, timezone
 
 
