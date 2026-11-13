@@ -735,7 +735,7 @@ class Handler(BaseHTTPRequestHandler):
             raw=file.read_bytes()
             mime='image/svg+xml' if path.path.endswith('.svg') else 'image/png'
             self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
-        if path.path in ('/ui-refresh.css','/ui-refresh.js'):
+        if path.path in ('/ui-refresh.css','/ui-refresh.js','/search-experience.js'):
             raw=(ROOT/path.path.lstrip('/')).read_bytes()
             self.send_response(200)
             self.send_header('Content-Type','text/css; charset=utf-8' if path.path.endswith('.css') else 'text/javascript; charset=utf-8')
