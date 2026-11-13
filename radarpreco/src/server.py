@@ -6,7 +6,7 @@ historical values. For a public hosted service add authentication and robust
 rate limits, persistent disk/database, schedule worker, and protection.
 """
 from __future__ import annotations
-import json, os, re, sqlite3, threading, time, unicodedata, hashlib
+import json, os, re, sqlite3, threading, time, unicodedata, hashlib, sys
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -416,7 +416,7 @@ def store_points(name,points):
 
 def read_history(name,days=7):
     # Same source series; don't confuse min prices from different stores.
-    if days not in ('7','30','90','365','all'):days='7'
+    if days not in ('7','30','90','180','365','all'):days='7'
     since=(datetime.now(timezone.utc)-timedelta(days=int(days))).isoformat(timespec='seconds') if days!='all' else '2000-01-01T00:00:00+00:00'
     quality_start=quality_cutoff(name)
     if quality_start:since=max(since,quality_start)
@@ -427,11 +427,19 @@ def read_history(name,days=7):
              WHERE product=? AND kind='snapshot' AND at>=?
              ORDER BY at DESC, price ASC LIMIT 1''',(name,since)).fetchone()
     offers=read_offers(name)
+    variants=sorted({o.get('variant_key') or 'sem-variante-informada' for o in offers})
     with lock,db_conn() as cn:
-        insight=alerts_engine.opportunity(cn,name,offers,minimum_at=quality_start)
+        if len(variants)>1:
+            insight={'ready':False,'reason':'mixed_variants','label':'Selecione uma variante',
+                     'sample_days':0,'current':None,'variants':variants}
+        else:
+            insight=alerts_engine.opportunity(cn,name,offers,minimum_at=quality_start)
+        audit=audit_runtime.summary(cn)
     return {'query':name,'days':days,'points':[dict(row) for row in rows],'insight':insight,
            'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),''),
-            'audit':price_assurance.audit_summary(offers),
+            'audit':{**price_assurance.audit_summary(offers),'recent_audit':audit},
+            'variants':[{'key':key,'label':next((o.get('variant_label') for o in offers if o.get('variant_key')==key),key)}
+                         for key in variants],
             'history_days':len(set(str(r['at'])[:10] for r in rows))}
 
 def job_get(name):
@@ -451,24 +459,53 @@ def job_mark_checked(name):
     with lock,db_conn() as cn:cn.execute('UPDATE bright_jobs SET checked_at=? WHERE product=?',(timestamp(),name))
 
 def record_merged(name,new_offers,stamp=None):
-    """Merge the responses from both providers; never overwrite a source during a pending job."""
-    new_offers=[o for o in new_offers
-                if offer_quality.device_offer_ok(name,str(o.get('title') or ''))
-                and price_assurance.classify(name,str(o.get('title') or ''),match_score(name,str(o.get('title') or '')))['status']=='title_matched']
-    if not new_offers:return read_offers(name)
+    """Validate, audit and quarantine candidates before storing prices."""
     stamp=stamp or timestamp()
-    # Keep only fresh old offers from other sources, never retain an outdated
-    # lower price for the same merchant after a newer observation.
-    cutoff=(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds')
-    old=[o for o in read_offers(name) if str(o.get('checked_at') or '')>=cutoff]
-    refreshed={normalize(str(o.get('source') or '')) for o in new_offers}
-    remaining=[o for o in old if normalize(str(o.get('source') or '')) not in refreshed]
-    merged=store_offer_cache(name,remaining+new_offers,stamp)
+    previous=read_offers(name)
+    accepted=[]
     with lock,db_conn() as cn:
-        alerts_engine.store_drop_alerts(cn,name,new_offers,stamp,minimum_at=quality_cutoff(name))
-    store_points(name,[{'series':'Loja • '+o['source'],'price':o['price'],'at':str(o.get('checked_at') or stamp),
-          'source':str(o.get('provider') or o['source']),'url':o['url'],'kind':'snapshot'}
-          for o in new_offers if o.get('price')])
+        for offer in new_offers:
+            o=dict(offer)
+            title=str(o.get('title') or '')
+            score=match_score(name,title)
+            classification=price_assurance.classify(name,title,score)
+            variant=variant_identity.key(name,title)
+            o['variant_key']=variant
+            o['variant_label']=variant_identity.describe(name,title)
+            if classification['status']=='rejected':
+                audit_runtime.record_audit(cn,name,o,'rejected','identidade_ou_variante_incompativel',variant)
+                continue
+            reason=audit_runtime.outlier(o,previous)
+            if reason is None:
+                rows=cn.execute("""SELECT series,price,at FROM prices
+                    WHERE product=? AND kind='snapshot' AND at>=?
+                    ORDER BY at DESC LIMIT 150""",
+                    (name,quality_cutoff(name) or '2000-01-01')).fetchall()
+                prior={}
+                for item in rows:
+                    if not str(item['series']).endswith(' • '+variant):continue
+                    day=str(item['at'])[:10]
+                    prior[day]=min(prior.get(day,float('inf')),float(item['price']))
+                if len(prior)>=3:
+                    baseline=sorted(prior.values())[len(prior)//2]
+                    if float(o.get('price') or 0)<baseline*.38:
+                        reason='preco_muito_abaixo_do_historico_comparavel'
+            status='pending_review' if reason else 'title_matched'
+            audit_runtime.record_audit(cn,name,o,status,reason or 'identidade_por_titulo',variant)
+            if not reason:accepted.append(o)
+    if not accepted:return read_offers(name)
+    cutoff=(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds')
+    old=[o for o in previous if str(o.get('checked_at') or '')>=cutoff]
+    refreshed={(normalize(str(o.get('source') or '')),o['variant_key']) for o in accepted}
+    remaining=[o for o in old
+        if (normalize(str(o.get('source') or '')),o.get('variant_key')) not in refreshed]
+    store_offer_cache(name,remaining+accepted,stamp)
+    with lock,db_conn() as cn:
+        alerts_engine.store_drop_alerts(cn,name,accepted,stamp,minimum_at=quality_cutoff(name))
+    store_points(name,[{'series':'Loja • '+o['source']+' • '+o['variant_key'],
+         'price':o['price'],'at':str(o.get('checked_at') or stamp),
+         'source':str(o.get('provider') or o['source']),'url':o['url'],
+         'kind':'snapshot'} for o in accepted if o.get('price')])
     return read_offers(name)
 
 def configured():
@@ -964,6 +1001,9 @@ def run_smoke_query():
         print('RADAR_SMOKE status=error category='+type(exc).__name__,flush=True)
 
 def main():
+    if os.environ.get('RADAR_QUALITY_SELFTEST')=='1':
+        import quality_selftest
+        print('RADAR_QUALITY_TEST passed=%d' % quality_selftest.run(sys.modules[__name__]),flush=True)
     if os.environ.get('RADAR_MATCH_SELFTEST')=='1':
         import matching_selftest
         checks=matching_selftest.run(match_score,extract_offers,product_identity.canonical_query,ROOT/'catalog.json')
