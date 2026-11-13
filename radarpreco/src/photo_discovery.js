@@ -2,13 +2,18 @@
 (()=>{
 'use strict';
 const list=document.getElementById('list');if(!list)return;
-const KEY='radarpreco_images_v1',DAY=86400000,cache=new Map(),miss=new Map(),queue=[],pending=new Set();
+const KEY='radarpreco_images_v2',DAY=86400000,cache=new Map(),miss=new Map(),queue=[],pending=new Set();
 let running=0,count=0,lastStart=0,timer=null;
 const normalize=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
 const valid=u=>typeof u==='string'&&/^https:\/\/[^\s<>"']+$/i.test(u)&&u.length<2000;
 const generic=new Set(['ssd','memoria','placa','mouse','headset','monitor','notebook','hd','celular','de','da','do','com','para','sem','laptop','ar','condicionado']);
 const special=new Set(['fe','pro','ultra','max','plus','mini','air','x','ti','super','se','tkl','lxs','oled','xt']);
 function correctModel(name,title){
+ const wanted=normalize(name),asset=normalize(title);
+ const isDevice=/\b(?:iphone|smartphone|celular|galaxy (?:a\d+|s\d+|m\d+|tab|z fold|z flip)|ipad|tablet|redmi|poco|moto [a-z]\d+)\b/.test(wanted);
+ const explicitAccessory=/^(?:kit |combo |pack |conjunto )?(?:capa|capinha|case|pelicula|carregador|cabo|tela|display|bateria|adaptador|acessorio)/.test(wanted);
+ const accessory=/\b(?:capa|capas|capinha|capinhas|case|cases|cover|pelicula|peliculas|carregador|carregadores|suporte|tela|display|bateria|bolsa|vidro|protetor|adesivo|cabo|adaptador|acessorio|acessorios|mockup|miniatura|replica|dummy)\b/.test(asset);
+ if(isDevice&&!explicitAccessory&&accessory)return false;
  const a=normalize(name).split(' ').filter(w=>w&&!generic.has(w)),b=new Set(normalize(title.replace(/^file:/i,'')).split(' '));
  const nums=a.filter(w=>/\d/.test(w)),qual=a.filter(w=>special.has(w));
  const brand=a.find(w=>w.length>2&&!/\d/.test(w)&&!special.has(w));

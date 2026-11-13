@@ -89,7 +89,7 @@ def mark_read(cn,device,alert_id,now):
         cn.execute('UPDATE price_alerts SET read_at=? WHERE device=? AND id=?',(now,device,ident))
 
 
-def store_drop_alerts(cn,product,new_offers,now=None):
+def store_drop_alerts(cn,product,new_offers,now=None,minimum_at=None):
     """Alert only if this exact merchant was previously observed more expensively.
 
     Called before writing the new price points. Prefer comparing only snapshots
@@ -107,7 +107,7 @@ def store_drop_alerts(cn,product,new_offers,now=None):
         if not merchant or new<=0:continue
         previous=cn.execute('''SELECT price,at FROM prices WHERE product=? AND series=? AND kind='snapshot'
             ORDER BY at DESC LIMIT 1''',(product,'Loja • '+merchant)).fetchone()
-        if not previous:continue
+        if not previous or (minimum_at and previous['at']<minimum_at):continue
         old=float(previous['price'])
         before=parse_at(previous['at'])
         if not before or old<=new or before>=incoming_at or incoming_at-before>timedelta(days=30):continue
@@ -123,7 +123,7 @@ def store_drop_alerts(cn,product,new_offers,now=None):
     return count
 
 
-def opportunity(cn,product,offers,now=None):
+def opportunity(cn,product,offers,now=None,minimum_at=None):
     """Compare today's fresh lowest offer to median of past *distinct* days.
 
     Days are aggregated to the best offer on that day; repeatedly fetched
@@ -141,6 +141,7 @@ def opportunity(cn,product,offers,now=None):
         return {'ready':False,'reason':'no_recent_price','label':'Sem cotação recente','sample_days':0,'current':None}
     best=round(min(current),2)
     since=(current_time-timedelta(days=365)).isoformat(timespec='seconds')
+    if minimum_at:since=max(since,minimum_at)
     records=cn.execute('''SELECT price,at FROM prices WHERE product=? AND kind IN ('snapshot','historical')
        AND at>=? ORDER BY at ASC LIMIT 25000''',(product,since)).fetchall()
     by_date={}

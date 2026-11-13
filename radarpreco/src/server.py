@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import providers
 import alerts_engine
-import accounts, variant_rules, pg_store
+import accounts, variant_rules, pg_store, offer_quality
 ROOT=Path(__file__).resolve().parent
 
 
@@ -98,7 +98,7 @@ def words(raw):
 def match_score(wanted,candidate):
     """Match title identity, required model and capacity; never cross FE/Ultra or 128/256GB."""
     a=words(wanted);b=words(candidate)
-    if not a or not b or variant_rules.incompatible(wanted,candidate):return 0.0
+    if not a or not b or variant_rules.incompatible(wanted,candidate) or not offer_quality.device_offer_ok(wanted,candidate):return 0.0
     sa,sb=set(a),set(b)
     # Every model number in the requested query must be present (accept 220 V / 220V).
     required=[t for t in a if re.search(r'\d',t)]
@@ -302,6 +302,8 @@ def store_offer_cache(name, items, at=None):
         merchant=str(item.get('source') or '').strip()[:100]
         price=numeric_price(item.get('price'))
         if not merchant or not price:continue
+        title=str(item.get('title') or '')
+        if not offer_quality.device_offer_ok(name,title) or match_score(name,title)<0.72:continue
         key=normalize(merchant)
         if key not in grouped or price<grouped[key]['price']:
             grouped[key]={**item, 'source':merchant,'price':price,'checked_at':str(item.get('checked_at') or stamp)}
@@ -316,7 +318,15 @@ def store_offer_cache(name, items, at=None):
 def read_offers(name):
     with lock,db_conn() as cn:
         rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price FROM offers WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
-    return [dict(row) for row in rows]
+    results=[]
+    trusted=offer_quality.minimum_trusted_at(name)
+    for row in rows:
+        item=dict(row)
+        if trusted and item['checked_at']<trusted:continue
+        title=item.get('title') or ''
+        if not offer_quality.device_offer_ok(name,title) or match_score(name,title)<0.72:continue
+        results.append(item)
+    return results
 
 
 def store_points(name,points):
@@ -336,15 +346,17 @@ def read_history(name,days=7):
     # Same source series; don't confuse min prices from different stores.
     if days not in ('7','30','90','365','all'):days='7'
     since=(datetime.now(timezone.utc)-timedelta(days=int(days))).isoformat(timespec='seconds') if days!='all' else '2000-01-01T00:00:00+00:00'
+    quality_start=offer_quality.minimum_trusted_at(name)
+    if quality_start:since=max(since,quality_start)
     with lock,db_conn() as cn:
         rows=cn.execute('''SELECT series,price,at,source,url,kind FROM prices
              WHERE product=? AND at >= ? ORDER BY at ASC LIMIT 4000''',(name,since)).fetchall()
         latest=cn.execute('''SELECT series,price,at,source,url,kind FROM prices
-             WHERE product=? AND kind='snapshot' AND at=(SELECT MAX(at) FROM prices WHERE product=? AND kind='snapshot')
-             ORDER BY price ASC LIMIT 1''',(name,name)).fetchone()
+             WHERE product=? AND kind='snapshot' AND at>=?
+             ORDER BY at DESC, price ASC LIMIT 1''',(name,since)).fetchone()
     offers=read_offers(name)
     with lock,db_conn() as cn:
-        insight=alerts_engine.opportunity(cn,name,offers)
+        insight=alerts_engine.opportunity(cn,name,offers,minimum_at=quality_start)
     return {'query':name,'days':days,'points':[dict(row) for row in rows],'insight':insight,
            'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),'')}
 
@@ -366,6 +378,9 @@ def job_mark_checked(name):
 
 def record_merged(name,new_offers,stamp=None):
     """Merge the responses from both providers; never overwrite a source during a pending job."""
+    new_offers=[o for o in new_offers
+                if offer_quality.device_offer_ok(name,str(o.get('title') or ''))
+                and match_score(name,str(o.get('title') or ''))>=0.72]
     if not new_offers:return read_offers(name)
     stamp=stamp or timestamp()
     # Keep only fresh old offers from other sources, never retain an outdated
@@ -376,7 +391,7 @@ def record_merged(name,new_offers,stamp=None):
     remaining=[o for o in old if normalize(str(o.get('source') or '')) not in refreshed]
     merged=store_offer_cache(name,remaining+new_offers,stamp)
     with lock,db_conn() as cn:
-        alerts_engine.store_drop_alerts(cn,name,new_offers,stamp)
+        alerts_engine.store_drop_alerts(cn,name,new_offers,stamp,minimum_at=offer_quality.minimum_trusted_at(name))
     store_points(name,[{'series':'Loja • '+o['source'],'price':o['price'],'at':str(o.get('checked_at') or stamp),
           'source':str(o.get('provider') or o['source']),'url':o['url'],'kind':'snapshot'}
           for o in new_offers if o.get('price')])
@@ -527,12 +542,14 @@ def catalog_cards(limit=450):
     """Serve the best stored offers (and genuine photos) without provider/API charges."""
     cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat(timespec='seconds')
     with lock,db_conn() as cn:
-        rows=cn.execute('''SELECT product,merchant,price,checked_at,image_url,shipping_price
+        rows=cn.execute('''SELECT product,merchant,title,price,checked_at,image_url,shipping_price
           FROM offers WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 2500''',(cutoff,)).fetchall()
     found={}
     for row in rows:
         item=dict(row);name=item.get('product')
         if not name or not numeric_price(item.get('price')):continue
+        if offer_quality.minimum_trusted_at(name) and item['checked_at']<offer_quality.minimum_trusted_at(name):continue
+        if match_score(name,str(item.get('title') or ''))<0.72:continue
         existing=found.get(name)
         if existing is None:
             found[name]=item
@@ -549,11 +566,13 @@ def highlights(limit=12):
     """Genuine fresh observations only. No fabricated product prices."""
     cutoff=(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds')
     with lock,db_conn() as cn:
-        rows=cn.execute('''SELECT product,merchant,price,checked_at,image_url,url,shipping_price
+        rows=cn.execute('''SELECT product,merchant,title,price,checked_at,image_url,url,shipping_price
           FROM offers WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 300''',(cutoff,)).fetchall()
     found={}
     for row in rows:
         data=dict(row);name=data['product']
+        if offer_quality.minimum_trusted_at(name) and data['checked_at']<offer_quality.minimum_trusted_at(name):continue
+        if match_score(name,str(data.get('title') or ''))<0.72:continue
         if name not in found or data['price']<found[name]['price']:found[name]=data
     return sorted(found.values(),key=lambda o:o['price'])[:limit]
 
