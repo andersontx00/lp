@@ -423,9 +423,14 @@ def read_history(name,days=7):
     with lock,db_conn() as cn:
         rows=cn.execute('''SELECT series,price,at,source,url,kind FROM prices
              WHERE product=? AND at >= ? ORDER BY at ASC LIMIT 4000''',(name,since)).fetchall()
-        latest=cn.execute('''SELECT series,price,at,source,url,kind FROM prices
-             WHERE product=? AND kind='snapshot' AND at>=?
-             ORDER BY at DESC, price ASC LIMIT 1''',(name,since)).fetchone()
+        # The highest timestamp is not necessarily the cheapest offer.
+        # Derive the last valid reading from audited, variant-qualified rows below.
+        latest=None
+    # Old legacy snapshots and generic provider histories have no variant key.
+    # Preserve them in storage for audit, but not in trusted charts or alerts.
+    rows=[row for row in rows
+        if row['kind']=='snapshot' and str(row['series']).count(' • ')>=2]
+    latest=max(rows,key=lambda row:str(row['at']),default=None)
     offers=read_offers(name)
     variants=sorted({o.get('variant_key') or 'sem-variante-informada' for o in offers})
     with lock,db_conn() as cn:
@@ -433,7 +438,8 @@ def read_history(name,days=7):
             insight={'ready':False,'reason':'mixed_variants','label':'Selecione uma variante',
                      'sample_days':0,'current':None,'variants':variants}
         else:
-            insight=alerts_engine.opportunity(cn,name,offers,minimum_at=quality_start)
+            insight=alerts_engine.opportunity(cn,name,offers,minimum_at=quality_start,
+                variant_key=(variants[0] if variants else None))
         audit=audit_runtime.summary(cn)
     return {'query':name,'days':days,'points':[dict(row) for row in rows],'insight':insight,
            'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),''),
