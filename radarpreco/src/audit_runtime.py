@@ -67,9 +67,14 @@ def summary(cn,days=30):
     rows=cn.execute("""SELECT status,COUNT(*) AS count FROM offer_audit_events
       WHERE checked_at>=? GROUP BY status""",(cutoff[:7]+'-01',)).fetchall()
     counts={r['status']:int(r['count']) for r in rows}
-    return {'accepted':counts.get('title_matched',0),'pending':counts.get('pending_review',0),
+    unresolved=cn.execute("""SELECT COUNT(*) FROM offer_audit_events a
+        LEFT JOIN offer_audit_decisions d ON d.audit_id=a.id
+        WHERE a.status='pending_review' AND d.audit_id IS NULL
+        AND a.checked_at>=?""",(cutoff[:7]+'-01',)).fetchone()[0]
+    return {'accepted':counts.get('title_matched',0),'pending':int(unresolved),
             'rejected':counts.get('rejected',0),
-            'description':'Eventos de auditoria do mês atual. Status verificado não significa certificação externa.'}
+            'resolved':counts.get('pending_review',0)-int(unresolved),
+            'description':'Eventos do mês atual. Correspondência por título não certifica preço, estoque ou entrega.'}
 
 def usage(cn):
     month=datetime.now(timezone.utc).date().isoformat()[:7]+'-01'
