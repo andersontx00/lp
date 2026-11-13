@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import re
 import statistics
+from offer_quality import minimum_trusted_at
 from datetime import datetime, timedelta, timezone
 
 
@@ -52,9 +53,15 @@ def device_key(raw):
 def watch_state(cn, device):
     watches = [dict(row) for row in cn.execute(
         'SELECT product,threshold,created_at,last_auto_at FROM watches WHERE device=? ORDER BY created_at DESC LIMIT 40', (device,))]
-    alerts = [dict(row) for row in cn.execute('''SELECT id,product,merchant,old_price,new_price,percent,
-        old_at,new_at,created_at,read_at FROM price_alerts WHERE device=? ORDER BY id DESC LIMIT 50''',(device,))]
-    unread = cn.execute('SELECT COUNT(*) FROM price_alerts WHERE device=? AND read_at=\'\'', (device,)).fetchone()[0]
+    # Old phone/tablet alerts may have been produced by accessory-only offers.
+    # Preserve them for an audit, but never surface them as genuine price drops.
+    alerts_raw = [dict(row) for row in cn.execute('''SELECT id,product,merchant,old_price,new_price,percent,
+        old_at,new_at,created_at,read_at FROM price_alerts WHERE device=? ORDER BY id DESC LIMIT 500''',(device,))]
+    alerts = [a for a in alerts_raw
+              if not minimum_trusted_at(a['product']) or a['new_at'] >= minimum_trusted_at(a['product'])][:50]
+    unread_rows = cn.execute("SELECT product,new_at FROM price_alerts WHERE device=? AND read_at=''",(device,)).fetchall()
+    unread = sum(1 for a in unread_rows
+                 if not minimum_trusted_at(a['product']) or a['new_at'] >= minimum_trusted_at(a['product']))
     return {'watches': watches, 'alerts': alerts, 'unread': unread,
             'note':'Alertas no aplicativo; o servidor gratuito pode suspender verificações quando inativo.'}
 
