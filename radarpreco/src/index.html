@@ -713,7 +713,7 @@ function storeComparison(rows){
  return `<div class="r5-shop-chart" role="img" aria-label="Comparação dos preços por loja">
   ${rows.slice(0,16).map((o,i)=>{
    const val=Number(o.price), width=Math.max(12,(val/hi)*100);
-   return `<div class="r5-offer-row ${i===0?'cheapest':''}"><span class="merchant" title="${esc(o.source||'Loja')}">${esc(o.source||'Loja')}${i===0?'<span class="r5-badge">${offerSortMode==='total'?'MENOR TOTAL CONHECIDO':offerSortMode==='pix'?'MENOR PIX CONFIRMADO':'MENOR ANUNCIADO'}</span>':''}</span><div class="bar-bg"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="amount">${brl(val)}</span></div>`;
+   return `<div class="r5-offer-row ${i===0?'cheapest':''}"><span class="merchant" title="${esc(o.source||'Loja')}">${esc(o.source||'Loja')}${i===0?'<span class="r5-badge">'+(offerSortMode==='total'?'MENOR TOTAL CONHECIDO':offerSortMode==='pix'?'MENOR PIX CONFIRMADO':'MENOR ANUNCIADO')+'</span>':''}</span><div class="bar-bg"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="amount">${brl(val)}</span></div>`;
   }).join('')}
   <div class="r5-status">${rows.length} oferta(s) na última consulta • ${esc(stamp)}. Preço anunciado antes de frete e cupons, salvo quando a fonte confirmar o custo de envio.</div><div class="r9-cost">${rows.slice(0,7).map(o=>`${esc(o.source)}: ${o.shipping_price==null?'<span class=\"r9-ship-unknown\">frete não informado</span>':'frete '+brl(o.shipping_price)+' • custo '+brl(Number(o.price)+Number(o.shipping_price))}`).join(' · ')}</div>
  </div>`;
