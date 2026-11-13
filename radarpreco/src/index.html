@@ -733,7 +733,7 @@ function notifyOpenBrowser(){
  const known=new Set(JSON.parse(localStorage.getItem('radar_notify_ids_v9')||'[]'));
  if(!notificationsPrimed){for(const a of feedAlerts)known.add(a.id);notificationsPrimed=true;}
  else for(const a of feedAlerts){if(!a.read_at&&!known.has(a.id)){
-  try{new Notification('Queda de preço no RadarPreço',{body:`${a.product}: ${a.percent}% de queda em ${a.merchant}`,tag:'radar-'+a.id})}catch(e){}
+  try{new Notification(a.type==='target'?'Meta de preço atingida':'Queda de preço no RadarPreço',{body:a.type==='target'?`${a.product}: ${brl(a.new_price)} em ${a.merchant}`:`${a.product}: ${a.percent}% de queda em ${a.merchant}`,tag:'radar-'+a.id})}catch(e){}
  }}
  for(const a of feedAlerts)known.add(a.id);
  try{localStorage.setItem('radar_notify_ids_v9',JSON.stringify([...known].slice(-200)))}catch(e){}
@@ -741,20 +741,27 @@ function notifyOpenBrowser(){
 function renderFeed(){
  if(!$('alertFeed'))return;
  const empty='<div class="r8-item"><strong>Nenhum alerta até agora</strong><small>Acompanhe um produto. Uma queda real na mesma loja poderá aparecer aqui quando a próxima cotação for registrada.</small></div>';
- $('alertFeed').innerHTML=feedAlerts.length?feedAlerts.map(a=>`<div class="r8-item ${a.read_at?'':'unread'}"><strong>${esc(a.product)}</strong><small>${esc(a.merchant)} • ${new Date(a.created_at).toLocaleString('pt-BR')}</small><div class="drop">▼ ${Number(a.percent).toFixed(1)}% de queda</div><small>${brl(a.old_price)} → ${brl(a.new_price)}</small></div>`).join(''):empty;
+ $('alertFeed').innerHTML=feedAlerts.length?feedAlerts.map(a=>`<div class="r8-item ${a.read_at?'':'unread'}"><strong>${esc(a.product)}</strong><small>${esc(a.merchant)} • ${new Date(a.created_at).toLocaleString('pt-BR')}</small><div class="drop">${a.type==='target'?'🎯 Preço-alvo atingido':'▼ '+Number(a.percent).toFixed(1)+'% de queda'}</div><small>${a.type==='target'?'Meta '+brl(a.old_price):brl(a.old_price)} → ${brl(a.new_price)}</small></div>`).join(''):empty;
  if(unreadAlerts)$('alertFeed').innerHTML+='<button id="markAllRead" style="margin-top:10px">Marcar alertas como lidos</button>';
 }
 function insightMarkup(){
  if(!insight||!insight.ready){
-  const info=insight&&insight.reason==='no_recent_price'?'Ainda não existe uma cotação das últimas 24 horas.':`Ainda não há três dias anteriores distintos com preços coletados (${Number(insight?.sample_days||0)}/3).`;
+  const info=insight?.reason==='mixed_variants'?'Há mais de uma variante nas lojas. Selecione um tamanho, cor ou configuração para uma análise confiável.':insight&&insight.reason==='no_recent_price'?'Ainda não existe uma cotação das últimas 24 horas.':`Ainda não há três dias anteriores distintos com preços coletados (${Number(insight?.sample_days||0)}/3).`;
   return `<div class="r8-score"><div class="head">📊 Indicador de oportunidade</div><strong>Histórico insuficiente</strong><small>${info} Não usamos valores estimados nem ofertas de um único dia como tendência.</small></div>`;
  }
  const delta=Number(insight.percent_below_median),text=delta>=0?`${delta.toFixed(1)}% abaixo da mediana`:`${Math.abs(delta).toFixed(1)}% acima da mediana`;
  return `<div class="r8-score ${esc(insight.level)}"><div class="head">📊 Indicador de oportunidade</div><strong>${esc(insight.label)}</strong><div class="big">${text}</div><small>Menor cotação recente: ${brl(insight.current)} • Mediana histórica: ${brl(insight.median)}<br>${insight.sample_days} dias anteriores diferentes, janela de ${insight.period_days} dias • confiança ${esc(insight.confidence)}.<br>Avaliação estatística, não garantia de economia; frete não incluído.</small></div>`;
 }
 function alertMarkup(){
- const active=watchActive(),threshold=watchThreshold();
- return `<div class="r8-watch"><div class="body"><b>🔔 Alerta automático por queda de preço</b><small>${active?'Acompanhamento ativado para este produto.':'Clique em Acompanhar para ativar o alerta (10% por padrão).'} Comparamos o valor de cada loja com a cotação anterior da mesma loja.</small>${watchWarning?`<small style="color:#f9c48a">${esc(watchWarning)}</small>`:''}</div><label style="font-size:10px;color:#b6cae6">Avisar se cair<br><select id="dropThreshold" aria-label="Queda percentual para alerta">${[5,10,15,20,30,50].map(v=>`<option value="${v}" ${threshold===v?'selected':''}>${v}% ou mais</option>`).join('')}</select></label></div>`;
+ const active=watchActive(),threshold=watchThreshold(),target=watchTarget();
+ return '<div class="r8-watch"><div class="body"><b>🔔 Alertas inteligentes</b>'+
+  '<small>'+(active?'Acompanhamento ativado.':'Clique em Acompanhar para ativar.')+
+  ' As quedas são comparadas por loja e variante. Uma meta de preço só dispara novamente depois que a oferta sobe e rearma.</small>'+
+  (watchWarning?'<small style="color:#ffcb91">'+esc(watchWarning)+'</small>':'')+'</div>'+
+  '<div class="rp-alert-config"><label>Queda percentual<select id="dropThreshold" aria-label="Queda percentual para alerta">'+
+  [5,10,15,20,30,50].map(v=>'<option value="'+v+'" '+(threshold===v?'selected':'')+'>'+v+'% ou mais</option>').join('')+
+  '</select></label><label>Preço-alvo (R$)<input id="rpTargetPrice" type="number" min="1" max="10000000" step="0.01" inputmode="decimal" value="'+esc(target)+'" placeholder="Opcional" aria-label="Preço-alvo em reais"></label>'+
+  '<button id="rpSaveTarget" type="button" class="action small">Salvar alerta</button></div></div>';
 }
 
 function renderDetail(){
