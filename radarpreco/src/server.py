@@ -56,6 +56,11 @@ def clean_query(q):
     if len(q)<2 or len(q)>160 or any(ord(c)<32 for c in q):raise ValueError('Nome deve ter entre 2 e 160 caracteres.')
     return product_identity.canonical_query(q)
 
+def quality_cutoff(name):
+    """Exclude legacy unverified snapshots across all product categories."""
+    starts=[offer_quality.minimum_trusted_at(name),product_identity.minimum_trusted_at(name)]
+    return max((x for x in starts if x),default=None)
+
 def normalize(s):
     s=unicodedata.normalize('NFKD',str(s or ''))
     return ''.join(c for c in s if not unicodedata.combining(c)).lower()
@@ -324,7 +329,7 @@ def read_offers(name):
     with lock,db_conn() as cn:
         rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price FROM offers WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
     results=[]
-    trusted=offer_quality.minimum_trusted_at(name)
+    trusted=quality_cutoff(name)
     for row in rows:
         item=dict(row)
         if trusted and item['checked_at']<trusted:continue
@@ -351,7 +356,7 @@ def read_history(name,days=7):
     # Same source series; don't confuse min prices from different stores.
     if days not in ('7','30','90','365','all'):days='7'
     since=(datetime.now(timezone.utc)-timedelta(days=int(days))).isoformat(timespec='seconds') if days!='all' else '2000-01-01T00:00:00+00:00'
-    quality_start=offer_quality.minimum_trusted_at(name)
+    quality_start=quality_cutoff(name)
     if quality_start:since=max(since,quality_start)
     with lock,db_conn() as cn:
         rows=cn.execute('''SELECT series,price,at,source,url,kind FROM prices
@@ -396,7 +401,7 @@ def record_merged(name,new_offers,stamp=None):
     remaining=[o for o in old if normalize(str(o.get('source') or '')) not in refreshed]
     merged=store_offer_cache(name,remaining+new_offers,stamp)
     with lock,db_conn() as cn:
-        alerts_engine.store_drop_alerts(cn,name,new_offers,stamp,minimum_at=offer_quality.minimum_trusted_at(name))
+        alerts_engine.store_drop_alerts(cn,name,new_offers,stamp,minimum_at=quality_cutoff(name))
     store_points(name,[{'series':'Loja • '+o['source'],'price':o['price'],'at':str(o.get('checked_at') or stamp),
           'source':str(o.get('provider') or o['source']),'url':o['url'],'kind':'snapshot'}
           for o in new_offers if o.get('price')])
@@ -553,7 +558,7 @@ def catalog_cards(limit=450):
     for row in rows:
         item=dict(row);name=item.get('product')
         if not name or not numeric_price(item.get('price')):continue
-        if offer_quality.minimum_trusted_at(name) and item['checked_at']<offer_quality.minimum_trusted_at(name):continue
+        if quality_cutoff(name) and item['checked_at']<quality_cutoff(name):continue
         if match_score(name,str(item.get('title') or ''))<0.72:continue
         existing=found.get(name)
         if existing is None:
@@ -576,7 +581,7 @@ def highlights(limit=12):
     found={}
     for row in rows:
         data=dict(row);name=data['product']
-        if offer_quality.minimum_trusted_at(name) and data['checked_at']<offer_quality.minimum_trusted_at(name):continue
+        if quality_cutoff(name) and data['checked_at']<quality_cutoff(name):continue
         if match_score(name,str(data.get('title') or ''))<0.72:continue
         if name not in found or data['price']<found[name]['price']:found[name]=data
     return sorted(found.values(),key=lambda o:o['price'])[:limit]
