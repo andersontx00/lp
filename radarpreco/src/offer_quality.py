@@ -51,11 +51,11 @@ def kind_of(query: str) -> str | None:
     q = normalized(query).strip()
     if _ACCESSORY_INTENT.search(q):
         return None
-    if re.search(r'\b(?:ipad|tablet|galaxy\s+tab|xiaomi\s+pad|lenovo\s+tab)\b', q):
+    if re.search(r'\b(?:ipad|tablet|galaxy\s+tab|xiaomi\s+pad|lenovo\s+tab|redmi\s+pad|kindle|kobo\s+(?:clara|libra))\b', q):
         return 'tablet'
     if re.search(r'\b(?:iphone|smartphone|celular|galaxy\s+(?:a\d+|s\d+|m\d+|z\s*(?:fold|flip)|note\s*\d+)|'
                  r'redmi(?:\s+note)?\s*\d+|poco\s+[a-z]\d+|moto\s+[a-z]\d+|'
-                 r'motorola\s+(?:edge|moto)|realme\s+\d+|zenfone\s+\d+|oneplus\s+\d+)\b', q):
+                 r'motorola\s+(?:edge|moto|razr)|realme\s+[a-z]?\d+|zenfone\s+\d+|oneplus\s+\d+|google\s+pixel\s+\d+|xiaomi\s+\d+[a-z]?)\b', q):
         return 'phone'
     return None
 
