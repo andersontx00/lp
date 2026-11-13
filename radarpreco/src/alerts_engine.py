@@ -238,9 +238,14 @@ def opportunity(cn,product,offers,now=None,minimum_at=None,variant_key=None):
 def next_due_product(cn,current_time=None):
     current_time=current_time or now_utc()
     cutoff=(current_time-timedelta(hours=24)).isoformat(timespec='seconds')
-    row=cn.execute('''SELECT product,MIN(last_auto_at) AS last_auto_at,COUNT(*) AS watchers
-        FROM watches GROUP BY product HAVING MIN(last_auto_at)='' OR MIN(last_auto_at)<?
-        ORDER BY watchers DESC, last_auto_at ASC LIMIT 1''',(cutoff,)).fetchone()
+    row=cn.execute('''SELECT w.product,MIN(w.last_auto_at) AS last_auto_at,
+        COUNT(*) AS watchers
+        FROM watches w LEFT JOIN collection_attempts c ON c.product=w.product
+        WHERE c.retry_after IS NULL OR c.retry_after<=?
+        GROUP BY w.product
+        HAVING MIN(w.last_auto_at)='' OR MIN(w.last_auto_at)<?
+        ORDER BY watchers DESC, last_auto_at ASC LIMIT 1''',
+        (current_time.isoformat(timespec='seconds'),cutoff)).fetchone()
     return row['product'] if row else None
 
 
