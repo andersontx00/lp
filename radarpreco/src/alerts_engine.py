@@ -116,8 +116,10 @@ def store_drop_alerts(cn,product,new_offers,now=None,minimum_at=None):
         try:new=float(offer.get('price'))
         except (TypeError,ValueError):continue
         if not merchant or new<=0:continue
+        variant=str(offer.get('variant_key') or 'sem-variante-informada')
+        series='Loja • '+merchant+' • '+variant
         previous=cn.execute('''SELECT price,at FROM prices WHERE product=? AND series=? AND kind='snapshot'
-            ORDER BY at DESC LIMIT 1''',(product,'Loja • '+merchant)).fetchone()
+            ORDER BY at DESC LIMIT 1''',(product,series)).fetchone()
         if not previous or (minimum_at and previous['at']<minimum_at):continue
         old=float(previous['price'])
         before=parse_at(previous['at'])
@@ -128,7 +130,7 @@ def store_drop_alerts(cn,product,new_offers,now=None,minimum_at=None):
             result=cn.execute('''INSERT OR IGNORE INTO price_alerts
               (device,product,merchant,old_price,new_price,percent,old_at,new_at,created_at)
               VALUES(?,?,?,?,?,?,?,?,?)''',
-              (observer['device'],product,merchant,round(old,2),round(new,2),round(pct,2),
+              (observer['device'],product,merchant+' · '+str(offer.get('variant_label') or variant),round(old,2),round(new,2),round(pct,2),
                previous['at'],stamp,stamp))
             count+=result.rowcount
     return count
