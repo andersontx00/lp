@@ -45,6 +45,15 @@ def init_schema(cn,postgres=False):
         read_at TEXT NOT NULL DEFAULT '',
         UNIQUE(device,product,merchant,new_at,new_price))''')
     cn.execute('CREATE INDEX IF NOT EXISTS alerts_owner_date ON price_alerts(device,id DESC)')
+    if postgres:
+        cn.execute('ALTER TABLE watches ADD COLUMN IF NOT EXISTS target_price DOUBLE PRECISION')
+    else:
+        cols={r[1] for r in cn.execute('PRAGMA table_info(watches)').fetchall()}
+        if 'target_price' not in cols:cn.execute('ALTER TABLE watches ADD COLUMN target_price REAL')
+    cn.execute('''CREATE TABLE IF NOT EXISTS watch_target_states (
+        device TEXT NOT NULL,product TEXT NOT NULL,merchant TEXT NOT NULL,
+        variant_key TEXT NOT NULL,armed INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(device,product,merchant,variant_key))''')
 
 
 def device_key(raw):
@@ -56,7 +65,7 @@ def device_key(raw):
 
 def watch_state(cn, device):
     watches = [dict(row) for row in cn.execute(
-        'SELECT product,threshold,created_at,last_auto_at FROM watches WHERE device=? ORDER BY created_at DESC LIMIT 40', (device,))]
+        'SELECT product,threshold,target_price,created_at,last_auto_at FROM watches WHERE device=? ORDER BY created_at DESC LIMIT 40', (device,))]
     # Old phone/tablet alerts may have been produced by accessory-only offers.
     # Preserve them for an audit, but never surface them as genuine price drops.
     alerts_raw = [dict(row) for row in cn.execute('''SELECT id,product,merchant,old_price,new_price,percent,
@@ -66,11 +75,12 @@ def watch_state(cn, device):
     unread_rows = cn.execute("SELECT product,new_at FROM price_alerts WHERE device=? AND read_at=''",(device,)).fetchall()
     unread = sum(1 for a in unread_rows
                  if not minimum_trusted_at(a['product']) or a['new_at'] >= minimum_trusted_at(a['product']))
+    for a in alerts:a['type']='target' if str(a.get('merchant') or '').startswith('Meta: ') else 'drop'
     return {'watches': watches, 'alerts': alerts, 'unread': unread,
             'note':'Alertas no aplicativo; o servidor gratuito pode suspender verificações quando inativo.'}
 
 
-def change_watch(cn, device, product, action, threshold, now):
+def change_watch(cn, device, product, action, threshold, now, target_price=None):
     if action == 'remove':
         cn.execute('DELETE FROM watches WHERE device=? AND product=?',(device,product))
         return
@@ -82,13 +92,22 @@ def change_watch(cn, device, product, action, threshold, now):
         raise ValueError('Queda percentual inválida.')
     if percent not in (5,10,15,20,30,50):
         raise ValueError('Escolha uma queda de 5%, 10%, 15%, 20%, 30% ou 50%.')
+    try:
+        target=float(target_price) if target_price not in ('',None) else None
+    except (ValueError,TypeError):
+        raise ValueError('Preço-alvo inválido.')
+    if target is not None and not (1<=target<=100000000):
+        raise ValueError('Preço-alvo deve ser positivo e válido.')
     n=cn.execute('SELECT COUNT(*) FROM watches WHERE device=?',(device,)).fetchone()[0]
     exists=cn.execute('SELECT 1 FROM watches WHERE device=? AND product=?',(device,product)).fetchone()
     if not exists and n>=30:
         raise ValueError('Limite de 30 monitoramentos por navegador atingido.')
-    cn.execute('''INSERT INTO watches(device,product,threshold,created_at) VALUES (?,?,?,?)
-        ON CONFLICT(device,product) DO UPDATE SET threshold=excluded.threshold''',
-        (device,product,percent,now))
+    cn.execute('''INSERT INTO watches(device,product,threshold,target_price,created_at) VALUES (?,?,?,?,?)
+        ON CONFLICT(device,product) DO UPDATE SET threshold=excluded.threshold,
+            target_price=excluded.target_price''',
+        (device,product,percent,target,now))
+    if target is not None:
+        cn.execute('UPDATE watch_target_states SET armed=1 WHERE device=? AND product=?',(device,product))
 
 
 def mark_read(cn,device,alert_id,now):
@@ -101,40 +120,65 @@ def mark_read(cn,device,alert_id,now):
 
 
 def store_drop_alerts(cn,product,new_offers,now=None,minimum_at=None):
-    """Alert only if this exact merchant was previously observed more expensively.
-
-    Called before writing the new price points. Prefer comparing only snapshots
-    less than 30 days old, and dedupe repeated same-price snapshots.
-    """
-    observers=list(cn.execute('SELECT device,threshold FROM watches WHERE product=?',(product,)))
+    """Variant-aware percentage and absolute target alerts with rearming."""
+    observers=[dict(x) for x in cn.execute('SELECT device,threshold,target_price FROM watches WHERE product=?',(product,))]
     if not observers:return 0
     stamp=now or now_utc().isoformat(timespec='seconds')
     incoming_at=parse_at(stamp) or now_utc()
     count=0
     for offer in new_offers:
         merchant=str(offer.get('source') or '').strip()[:100]
+        variant=str(offer.get('variant_key') or 'sem-variante-informada')
+        label=str(offer.get('variant_label') or variant)[:90]
         try:new=float(offer.get('price'))
         except (TypeError,ValueError):continue
         if not merchant or new<=0:continue
-        variant=str(offer.get('variant_key') or 'sem-variante-informada')
         series='Loja • '+merchant+' • '+variant
         previous=cn.execute('''SELECT price,at FROM prices WHERE product=? AND series=? AND kind='snapshot'
-            ORDER BY at DESC LIMIT 1''',(product,series)).fetchone()
-        if not previous or (minimum_at and previous['at']<minimum_at):continue
-        old=float(previous['price'])
-        before=parse_at(previous['at'])
-        if not before or old<=new or before>=incoming_at or incoming_at-before>timedelta(days=30):continue
-        pct=(old-new)*100/old
+             ORDER BY at DESC LIMIT 1''',(product,series)).fetchone()
+        old=float(previous['price']) if previous else None
+        before=parse_at(previous['at']) if previous else None
+        valid_previous=(previous is not None and
+            (not minimum_at or previous['at']>=minimum_at) and
+            before and before<incoming_at and
+            incoming_at-before<=timedelta(days=30))
+        pct=(old-new)*100/old if valid_previous and old>new else 0
         for observer in observers:
-            if pct+1e-8<float(observer['threshold']):continue
+            device=observer['device']
+            if valid_previous and pct+1e-8>=float(observer['threshold']):
+                label_merchant=merchant+' · '+label
+                result=cn.execute('''INSERT OR IGNORE INTO price_alerts
+                  (device,product,merchant,old_price,new_price,percent,old_at,new_at,created_at)
+                  VALUES(?,?,?,?,?,?,?,?,?)''',
+                  (device,product,label_merchant,round(old,2),round(new,2),round(pct,2),
+                   previous['at'],stamp,stamp))
+                count+=result.rowcount
+            target=observer.get('target_price')
+            if target is None:continue
+            target=float(target)
+            state=cn.execute('''SELECT armed FROM watch_target_states
+                WHERE device=? AND product=? AND merchant=? AND variant_key=?''',
+                (device,product,merchant,variant)).fetchone()
+            armed=bool(state['armed']) if state else True
+            if new>target:
+                cn.execute('''INSERT INTO watch_target_states(device,product,merchant,variant_key,armed)
+                    VALUES(?,?,?,?,1)
+                    ON CONFLICT(device,product,merchant,variant_key) DO UPDATE SET armed=1''',
+                    (device,product,merchant,variant))
+                continue
+            if not armed:continue
+            label_merchant='Meta: '+merchant+' · '+label
             result=cn.execute('''INSERT OR IGNORE INTO price_alerts
-              (device,product,merchant,old_price,new_price,percent,old_at,new_at,created_at)
-              VALUES(?,?,?,?,?,?,?,?,?)''',
-              (observer['device'],product,merchant+' · '+str(offer.get('variant_label') or variant),round(old,2),round(new,2),round(pct,2),
-               previous['at'],stamp,stamp))
+                (device,product,merchant,old_price,new_price,percent,old_at,new_at,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?)''',
+                (device,product,label_merchant,target,round(new,2),
+                 round(max(0,(target-new)/target*100),2),stamp,stamp,stamp))
             count+=result.rowcount
+            cn.execute('''INSERT INTO watch_target_states(device,product,merchant,variant_key,armed)
+                VALUES(?,?,?,?,0)
+                ON CONFLICT(device,product,merchant,variant_key) DO UPDATE SET armed=0''',
+                (device,product,merchant,variant))
     return count
-
 
 def opportunity(cn,product,offers,now=None,minimum_at=None):
     """Compare today's fresh lowest offer to median of past *distinct* days.
