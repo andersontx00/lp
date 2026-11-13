@@ -567,6 +567,27 @@ def perform_refresh(name,owner='anonymous'):
         with lock:last_fetch[name.casefold()]=now-CACHE_SECONDS+120
     return out
 
+def catalog_suggestions(query,limit=8):
+    """Suggest known catalog models locally; never spend provider credits."""
+    text=normalize(query).strip()
+    if len(text)<2:return []
+    try:data=json.loads((ROOT/'catalog.json').read_text(encoding='utf-8'))
+    except (OSError,ValueError):return []
+    terms=[x for x in re.findall(r'[a-z0-9]+',text) if x not in ('de','do','da','para')]
+    if not terms:return []
+    matches=[]
+    for row in data:
+        name=normalize(row.get('name') or '')
+        sub=normalize(row.get('subcategory') or '')
+        if not all(token in name or token in sub for token in terms):continue
+        rank=(100 if name==text else 70 if name.startswith(text) else 40)
+        rank+=sum(4 for t in terms if re.search(r'(?<![a-z0-9])'+re.escape(t)+r'(?![a-z0-9])',name))
+        matches.append((rank,len(name),row))
+    matches.sort(key=lambda x:(-x[0],x[1]))
+    return [{'name':o.get('name'),'category':o.get('category'),'subcategory':o.get('subcategory')}
+            for _,_,o in matches[:limit]]
+
+
 def catalog_cards(limit=450):
     """Serve the best stored offers (and genuine photos) without provider/API charges."""
     cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat(timespec='seconds')
@@ -701,6 +722,10 @@ class Handler(BaseHTTPRequestHandler):
             if not user:self.respond({'error':'Faça login para sincronizar favoritos.'},401);return
             with lock,db_conn() as cn:saved=accounts.favorites(cn,user['id'])
             self.respond({'favorites':saved});return
+        if path.path=='/api/suggest':
+            query=(parse_qs(path.query).get('q') or [''])[0][:100]
+            self.respond({'items':catalog_suggestions(query),'no_billable_queries':True})
+            return
         if path.path=='/api/catalog-cards':
             self.respond({'items':catalog_cards(),'source':'stored_verified_offers','no_billable_queries':True});return
         if path.path=='/api/highlights':
@@ -747,6 +772,29 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path=urlsplit(self.path)
         if not self.safe_origin():self.respond({'error':'Origem não autorizada.'},403);return
+        if path.path=='/api/report-offer':
+            try:
+                body=self.request_json(1800)
+                name=clean_query(body.get('product',''))
+                merchant=str(body.get('merchant') or '').strip()[:100]
+                reason=str(body.get('reason') or '').strip()[:90]
+                if reason not in ('modelo_incorreto','variante_incorreta','anuncio_indisponivel','preco_incorreto'):
+                    raise ValueError('Motivo de revisão inválido.')
+                match=next((o for o in read_offers(name) if o['source']==merchant),None)
+                if not match:raise ValueError('Oferta não encontrada na consulta atual.')
+                fingerprint=hashlib.sha256((self.client_address[0]+'|'+os.environ.get('RADAR_REPORT_SALT','radar-report')).encode()).hexdigest()
+                with lock,db_conn() as cn:
+                    n=cn.execute('SELECT COUNT(*) FROM offer_reports WHERE reporter=? AND created_at>=?',
+                         (fingerprint,datetime.now(timezone.utc).date().isoformat())).fetchone()[0]
+                    if n>=8:raise ValueError('Limite diário de revisões atingido.')
+                    cn.execute('INSERT INTO offer_reports(product,merchant,title,reason,created_at,reporter) VALUES(?,?,?,?,?,?)',
+                        (name,merchant,str(match.get('title') or '')[:200],reason,timestamp(),fingerprint))
+                self.respond({'received':True,'message':'Oferta enviada para revisão. Não será retirada automaticamente.'})
+            except (ValueError,TypeError,json.JSONDecodeError) as exc:
+                self.respond({'error':str(exc) if isinstance(exc,ValueError) else 'Dados inválidos.'},400)
+            except Exception:
+                self.respond({'error':'Não foi possível registrar a revisão agora.'},503)
+            return
         if path.path in ('/api/auth/register','/api/auth/login','/api/auth/logout','/api/auth/migrate_watch','/api/favorites'):
             try:
                 body=self.request_json(10000)
