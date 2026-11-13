@@ -579,10 +579,11 @@ function graph(points){
   return `<div class="r4-graphwrap">${graphSvg}${note}</div>`;
 }
 function priceTimeline(){
-  const local=observed(selection).map(p=>({...p,series:'Registro manual',kind:'manual'}));
+  // Only verified server observations belong in the market price graph.
+  // Personal price notes remain in the local export; never affect "best price".
   const remote=remoteHistory.map(p=>({...p}));
   const unique=new Map();
-  for(const p of [...remote,...local]){let k=[p.series||'',p.at,p.price,p.kind||''].join('|');unique.set(k,p)}
+  for(const p of remote){let k=[p.series||'',p.at,p.price,p.kind||''].join('|');unique.set(k,p)}
   return [...unique.values()].sort((a,b)=>new Date(a.at)-new Date(b.at));
 }
 function trendText(points){
@@ -711,7 +712,7 @@ function renderDetail(){
   ${valid.length?`<div class="sectiontitle">Ofertas com detalhes e acesso à loja</div><div class="offers">${valid.map(offerHTML).join('')}</div>`:''}
   <details style="margin-top:14px"><summary style="cursor:pointer;font-size:11px;color:#a2bcea">Links de pesquisa adicionais (opcional)</summary><div class="market-grid" style="margin-top:10px">${markets.map(([n,url])=>`<a class="market" href="${esc(url)}" target="_blank" rel="noopener noreferrer"><span>${esc(n)}</span><span>↗</span></a>`).join('')}</div></details>
   <div class="explain">Os valores vêm de fontes integradas (Bright Data, Mercado Livre e SerpApi opcional) e registros datados. O gráfico não inventa cotações anteriores. Se as lojas só tiverem preços de hoje, a comparação por loja aparece acima, e o gráfico temporal mostra apenas os pontos existentes. Confirme voltagem, capacidade, condição, frete e variações do modelo. ${isVehicle?'Para carros usados, a API de compras não fornece comparação confiável de anúncios nesta versão.':''}</div>
-  <details><summary style="cursor:pointer;color:#93b7ff;font-weight:800;font-size:11px;margin-top:18px">Adicionar preço encontrado por você</summary><form id="manualForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><input name="price" aria-label="Preço observado" required type="number" min="0.01" step="0.01" placeholder="Valor em R$" style="width:125px;padding:9px;border-radius:8px;border:1px solid #426284;background:#0e1d33;color:#fff"><input name="source" aria-label="Nome da loja" placeholder="Loja/fonte" style="flex:1;min-width:110px;padding:9px;border-radius:8px;border:1px solid #426284;background:#0e1d33;color:#fff"><button type="submit" class="action small">Registrar</button></form></details>`;
+  <details><summary style="cursor:pointer;color:#93b7ff;font-weight:800;font-size:11px;margin-top:18px">Anotar um preço pessoal (não afeta o comparador)</summary><form id="manualForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><input name="price" aria-label="Preço observado" required type="number" min="0.01" step="0.01" placeholder="Valor em R$" style="width:125px;padding:9px;border-radius:8px;border:1px solid #426284;background:#0e1d33;color:#fff"><input name="source" aria-label="Nome da loja" placeholder="Loja/fonte" style="flex:1;min-width:110px;padding:9px;border-radius:8px;border:1px solid #426284;background:#0e1d33;color:#fff"><button type="submit" class="action small">Registrar</button></form></details>`;
  if(!$('r9shareBtn')){const share=document.createElement('button');share.id='r9shareBtn';share.className='r9-account-btn';share.textContent='↗ Compartilhar oferta';share.addEventListener('click',shareProduct);$('detail').appendChild(share)}
  const productImg=$('detail').querySelector('.r6-image img');
  if(productImg)productImg.addEventListener('error',()=>{productImg.replaceWith(Object.assign(document.createElement('span'),{className:'r6-fallback',textContent:p.icon||'📦'}))},{once:true});
