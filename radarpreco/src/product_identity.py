@@ -7,6 +7,9 @@ from recommendations but preserved in storage for audit.
 from __future__ import annotations
 import re
 import unicodedata
+import json
+from pathlib import Path
+from functools import lru_cache
 
 QUALITY_REBASE_AT = '2026-11-13T17:00:12+00:00'
 
@@ -57,9 +60,43 @@ def _model_edition(text,family):
         return found.group(0) if found else 'base'
     return None
 
+@lru_cache(maxsize=1)
+def _catalog_model_names():
+    """Map each catalog model to neighboring models in the SAME subcategory."""
+    by_group={}
+    catalog=Path(__file__).with_name('catalog.json')
+    if not catalog.exists():return {}
+    for row in json.loads(catalog.read_text(encoding='utf-8')):
+        if row.get('kind')!='model':continue
+        group=(row.get('category'),row.get('subcategory'))
+        name=re.sub(r'[^a-z0-9]+',' ',normalized(row.get('name'))).strip()
+        if name:by_group.setdefault(group,set()).add(name)
+    lookup={}
+    for names in by_group.values():
+        siblings=tuple(sorted(names,key=len,reverse=True))
+        for name in names:lookup[name]=siblings
+    return lookup
+
+def catalog_sibling_ok(wanted,title):
+    """A longer *known* sibling model overrides its shorter name prefix.
+
+    E.g. BlackShark V2 Pro must not be priced as BlackShark V2.
+    """
+    query=re.sub(r'[^a-z0-9]+',' ',normalized(canonical_query(wanted))).strip()
+    possible=_catalog_model_names().get(query)
+    if not possible:return True
+    listed=re.sub(r'[^a-z0-9]+',' ',normalized(title)).strip()
+    matches=[name for name in possible
+             if re.search(r'(?<!\w)'+re.escape(name)+r'(?!\w)',listed)]
+    return not matches or max(matches,key=len)==query
+
 def exact_model_ok(wanted,title):
     q=normalized(canonical_query(wanted));t=normalized(title)
-    if not q or not t or not brand_ok(q,t):return False
+    if not q or not t or not brand_ok(q,t) or not catalog_sibling_ok(wanted,title):return False
+    # Exact variant tokens are part of the model, not optional description.
+    editions=('pro','plus','ultra','max','super','ti','xt','tkl','mini','fe','ii')
+    for edition in editions:
+        if has_term(q,edition) and not has_term(t,edition):return False
     # A complete device must not be confused with a replacement part.
     accessory_re=r'\b(?:capa|capinha|pelicula|carregador|bateria|tela|display|protetor)\b'
     wanted_part=bool(re.match(r'^(?:kit\s+)?(?:capa|capinha|pelicula|carregador|cabo|bateria|tela|display|protetor|suporte)\b',q))
