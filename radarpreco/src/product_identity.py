@@ -91,6 +91,9 @@ def catalog_sibling_ok(wanted,title):
     return not matches or max(matches,key=len)==query
 
 def exact_model_ok(wanted,title):
+    from product_codes import compare as compare_product_codes
+    if not compare_product_codes(wanted, title)[0]:
+        return False
     q=normalized(canonical_query(wanted));t=normalized(title)
     if not q or not t or not brand_ok(q,t) or not catalog_sibling_ok(wanted,title):return False
     # Exact variant tokens are part of the model, not optional description.
