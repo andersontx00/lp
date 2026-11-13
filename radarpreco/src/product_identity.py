@@ -72,16 +72,25 @@ def exact_model_ok(wanted,title):
     if re.search(r'\b(?:replica|miniatura|fake|dummy|caixa\s+vazia|kit\s+de\s+pecas)\b',t):return False
     # 'Eleva Pro 2.0' is the sole technology of some genuine Corre 4 listings.
     # It does not identify the model: the exact 'Corre 4' phrase is required.
-    shoe=re.search(r'\b(?:olympikus\s+)?corre\s*([345])\b',q)
-    if shoe:
-        generation=shoe.group(1)
-        matching=re.search(r'\bcorre\s*'+generation+r'\b',t)
-        if not matching:return False
-        editions=re.findall(r'\bcorre\s*([345])\b',t)
-        if len(set(editions))!=1:return False
+    # Corre 4, Corre Supra, Corre Grafeno 2 and Corre 4 Plus are
+    # different shoes. Require the same explicit family and generation.
+    family_pattern=r'\bcorre\s*(?:(grafeno|supra|turbo|plus)\s*)?([2-5])?(?![\w])'
+    def corre_key(match,text):
+        modifier=match.group(1) or ''
+        generation=match.group(2) or ''
+        tail=text[match.end():].strip()
+        after=re.match(r'^(?:grafeno|supra|turbo|plus)\b',tail)
+        if not modifier and after:modifier=after.group(0)
+        return (modifier,generation)
+    qfamilies=[corre_key(x,q) for x in re.finditer(family_pattern,q)]
+    qfamilies=[x for x in qfamilies if x!=('','')]
+    if qfamilies:
+        tfound=list(re.finditer(family_pattern,t))
+        tkeys=[corre_key(x,t) for x in tfound if corre_key(x,t)!=('','')]
+        if not tkeys or any(x!=qfamilies[0] for x in tkeys):return False
+        first=t.find('corre')
         other_first=re.search(r'\bolympikus\s+(?:eleva|dynamic|index|venus|flit)\b',t)
-        if other_first and other_first.start()<matching.start():return False
-        if re.search(r'\bcorre\s*'+generation+r'\s+(?:plus|turbo|supra|grafeno)\b',t) and not re.search(r'\b(?:plus|turbo|supra|grafeno)\b',q):return False
+        if other_first and other_first.start()<first:return False
     for family in (r'\biphone\s*\d{1,2}\b',r'\b(?:geforce\s+)?rtx\s*\d{4}\b'):
         if not re.search(family,q):continue
         qm=_model_edition(q,family);tm=_model_edition(t,family)
@@ -95,6 +104,18 @@ def exact_model_ok(wanted,title):
             qplus=bool(re.search(r'\bg502\s*x\s*plus\b',q))
             tplus=bool(re.search(r'\bg502\s*x\s*plus\b',t))
             if qplus!=tplus:return False
+    if 'civic' in q:
+        versions=('lxs','lxr','exr','exl','touring')
+        qt=next((v for v in versions if has_term(q,v)),None)
+        found={v for v in versions if has_term(t,v)}
+        if qt and (qt not in found or len(found)!=1):return False
+        if not qt and found:return False
+        if has_term(q,'manual') and not has_term(t,'manual'):return False
+        if has_term(q,'manual') and (has_term(t,'automatico') or has_term(t,'cvt')):return False
+    if re.search(r'\bg502\s*x\b',q):
+        qwire=has_term(q,'lightspeed')
+        twire=has_term(t,'lightspeed') or has_term(t,'wireless') or has_term(t,'sem fio')
+        if qwire!=twire:return False
     for unit in ('gb','tb','v'):
         requested={re.sub(r'\s+','',x) for x in re.findall(r'\b\d+\s*'+unit+r'\b',q)}
         found={re.sub(r'\s+','',x) for x in re.findall(r'\b\d+\s*'+unit+r'\b',t)}
