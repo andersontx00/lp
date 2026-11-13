@@ -766,7 +766,7 @@ function alertMarkup(){
 
 function renderDetail(){
  const p=getByName(selection),isVehicle=p.category==='Carros'||p.category==='Motos e peças',markets=shopLinks(queryFor(p.name),isVehicle);
- const obs=priceTimeline(),valid=currentOffers();
+ const obs=priceTimeline(),valid=currentOffers(),displayOffers=orderedOffers(valid),evidence=marketStats(obs);
  const last=remoteLatest||obs.filter(x=>x.kind==='manual'||x.kind==='snapshot').at(-1)||obs.at(-1);
  const shown=valid.length?{price:Number(valid[0].price),source:valid[0].source,at:valid[0].checked_at}:last;
  const mine=persist.saved.includes(p.name); const photo=getPhoto(); const photoRecord=window.RadarPrecoProductImages?.get(norm(p.name));const photoCredit=photoRecord&&photo===photoRecord.url?`<a class="r11-photo-credit" href="${esc(photoRecord.source)}" target="_blank" rel="noopener noreferrer">Foto: ${esc(photoRecord.author)} • ${esc(photoRecord.license)} (ver origem)</a>`:''; const photoBlock=photo?`<img src="${esc(photo)}" alt="Foto do produto ${esc(p.name)}" loading="lazy" referrerpolicy="no-referrer">`:`<span class="r6-fallback" aria-label="Imagem indisponível">${esc(p.icon||'📦')}</span>`;
@@ -778,6 +778,7 @@ function renderDetail(){
  const savings=high!=null&&low!=null?high-low:null;
  $('detail').innerHTML=`<div class="r6-head"><div class="r6-image">${photoBlock}</div><div><div class="categorytag">${esc(p.icon||'🌐')} ${esc(p.category)} / ${esc(p.subcategory)}</div><h2>${esc(p.name)}</h2><div class="r6-sub">${photo?(photoCredit?'Imagem de acervo licenciado':'Imagem do anúncio encontrado'):'Buscando foto do modelo (sem consumir consultas de preços)…'}${photoCredit?`<div>${photoCredit}</div>`:''}</div></div></div>
   ${isS24(p.name)?`<div class="r6-variants"><span class="r6-label">Armazenamento</span><button data-variant="128GB" class="${variantS24==='128GB'?'active':''}">128 GB</button><button data-variant="256GB" class="${variantS24==='256GB'?'active':''}">256 GB</button><span class="r6-hint">Comparação separada por variante</span></div>`:''}
+  ${availableVariants.length>1?`<div class="rp-variants-panel"><strong>Variantes identificadas nas lojas</strong><small>Tamanhos, cores e capacidades não são produtos idênticos. Selecione uma configuração para a comparação exclusiva.</small><div>${availableVariants.slice(0,16).map(v=>`<button type="button" data-variant-choice="${esc(v.key)}">${esc(v.label||v.key)}</button>`).join('')}</div></div>`:''}
   ${!provider&&!shown?`<div class="r6-warning">⚠ O catálogo está disponível, mas a busca automática não está conectada nesta versão. Nenhum preço será inventado. Ao ativar a API no servidor, a pesquisa será feita ao tocar em qualquer modelo.</div>`:''}
   ${!shown?`<a class="action small" style="display:inline-block;margin:4px 0 10px;text-decoration:none" href="${esc(markets[0][1])}" target="_blank" rel="noopener noreferrer">Pesquisar ofertas (alternativa externa) ↗</a>`:''}
   <div class="pricecard r4-pricecard"><div class="price-label">${quoteState} ${loading?'· Atualizando…':''}</div><div class="price-value" id="currentPrice">${currentText}</div><div class="price-expl">${currentSub}</div>${fetchMessage?`<div class="r4-alert">${esc(fetchMessage)}</div>`:''}</div>
@@ -785,15 +786,24 @@ function renderDetail(){
   ${insightMarkup()}
   <div class="r5-summary"><div class="r5-stat"><label>Menor oferta</label><b id="lowPrice">${low!=null?brl(low):'—'}</b></div><div class="r5-stat"><label>Maior oferta</label><b id="highPrice">${high!=null?brl(high):'—'}</b></div><div class="r5-stat"><label>Diferença entre lojas</label><b id="priceSpread">${savings!=null?brl(savings):'—'}</b></div></div>
   <div class="sectiontitle r5-list-title">🏬 Preço em cada loja ${valid.length?`(${valid.length})`:''}</div>
-  ${storeComparison(valid)}
+  <div class="rp-mode"><strong>Ordenar ofertas por</strong><div class="rp-mode-buttons">
+    <button type="button" data-costsort="announced" class="${offerSortMode==='announced'?'active':''}">Menor anunciado</button>
+    <button type="button" data-costsort="total" class="${offerSortMode==='total'?'active':''}">Produto + frete conhecido</button>
+    <button type="button" data-costsort="pix" class="${offerSortMode==='pix'?'active':''}">Pix confirmado</button>
+   </div><small>Quando não houver informação de frete ou Pix, a oferta fica depois das que têm dados. O preço em destaque continua sendo o menor anunciado.</small></div>
+   ${storeComparison(displayOffers)}
    <div class="rp-audit-note"><strong>Como verificamos:</strong> modelo e variante comparados ao título do anúncio. O código GTIN/EAN ainda não é confirmado pelas fontes. Produtos com identificação insuficiente não entram no menor preço nem no gráfico. Frete, Pix e parcelas são mostrados somente quando informados.</div>
-  <div class="sectiontitle graph-head r4-graph-head"><span>📈 Evolução dos preços por loja</span><div class="timefilters">${[[7,'7 dias'],[30,'30 dias'],[90,'90 dias'],[365,'1 ano'],['all','Tudo']].map(([v,n])=>`<button data-period="${v}" class="${String(chartPeriod)===String(v)?'active':''}">${n}</button>`).join('')}</div></div>
+  <div class="sectiontitle graph-head r4-graph-head"><span>📈 Evolução dos preços por loja</span><div class="timefilters">${[[7,'7 dias'],[30,'30 dias'],[90,'90 dias'],[365,'1 ano'],[180,'6 meses'],['all','Tudo']].map(([v,n])=>`<button data-period="${v}" class="${String(chartPeriod)===String(v)?'active':''}">${n}</button>`).join('')}</div></div>
   <div class="r4-period-info">${chartPeriod==='all'?'Todos os registros':`Últimos ${chartPeriod} dias`} • ${obs.filter(x=>chartPeriod==='all'||new Date(x.at).getTime()>=Date.now()-Number(chartPeriod)*86400000).length} cotação(ões) ${loading?'• atualizando…':''}</div>
-  <div class="chart r4-chart">${graph(obs)}</div><div class="rp-evidence">Registros distintos no gráfico: ${obs.length} • dias com registros: ${new Set(obs.map(p=>String(p.at||'').slice(0,10))).size}. Curvas mostram apenas observações realmente armazenadas, não previsões.</div>
+  <div class="chart r4-chart">${graph(obs)}</div>
+  <div class="rp-history-stats"><span><small>Menor diária</small><strong>${evidence.min==null?'—':brl(evidence.min)}</strong></span>
+  <span><small>Maior diária</small><strong>${evidence.max==null?'—':brl(evidence.max)}</strong></span>
+  <span><small>Mediana diária</small><strong>${evidence.median==null?'—':brl(evidence.median)}</strong></span></div>
+  <div class="rp-evidence">Qualidade do histórico: ${evidence.observations} observações válidas • ${evidence.days} dias com dados • ${evidence.series} séries por loja/variante • ${evidence.gaps} dia(s) sem leitura entre a primeira e a última data. Nenhum ponto inventado.</div>
   <div class="r4-trend">${trendText(obs.filter(x=>chartPeriod==='all'||new Date(x.at).getTime()>=Date.now()-Number(chartPeriod)*86400000))}</div>
   ${alertMarkup()}
   <div class="detail-actions"><button class="action ${mine?'good':''}" id="trackBtn">${mine?'✓ Acompanhando':'☆ Acompanhar'}</button>${provider?'<button class="action mainbutton" id="integratedBtn">↻ Atualizar preços das lojas</button>':''}</div>
-  ${valid.length?`<div class="sectiontitle">Ofertas com detalhes e acesso à loja</div><div class="offers">${valid.map(offerHTML).join('')}</div>`:''}
+  ${valid.length?`<div class="sectiontitle">Ofertas com detalhes e acesso à loja</div><div class="offers">${displayOffers.map(offerHTML).join('')}</div>`:''}
   <details style="margin-top:14px"><summary style="cursor:pointer;font-size:11px;color:#a2bcea">Links de pesquisa adicionais (opcional)</summary><div class="market-grid" style="margin-top:10px">${markets.map(([n,url])=>`<a class="market" href="${esc(url)}" target="_blank" rel="noopener noreferrer"><span>${esc(n)}</span><span>↗</span></a>`).join('')}</div></details>
   <div class="explain">Os valores vêm de fontes integradas (Bright Data, Mercado Livre e SerpApi opcional) e registros datados. O gráfico não inventa cotações anteriores. Se as lojas só tiverem preços de hoje, a comparação por loja aparece acima, e o gráfico temporal mostra apenas os pontos existentes. Confirme voltagem, capacidade, condição, frete e variações do modelo. ${isVehicle?'Para carros usados, a API de compras não fornece comparação confiável de anúncios nesta versão.':''}</div>
   <details><summary style="cursor:pointer;color:#93b7ff;font-weight:800;font-size:11px;margin-top:18px">Anotar um preço pessoal (não afeta o comparador)</summary><form id="manualForm" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><input name="price" aria-label="Preço observado" required type="number" min="0.01" step="0.01" placeholder="Valor em R$" style="width:125px;padding:9px;border-radius:8px;border:1px solid #426284;background:#0e1d33;color:#fff"><input name="source" aria-label="Nome da loja" placeholder="Loja/fonte" style="flex:1;min-width:110px;padding:9px;border-radius:8px;border:1px solid #426284;background:#0e1d33;color:#fff"><button type="submit" class="action small">Registrar</button></form></details>`;
@@ -804,7 +814,7 @@ function renderDetail(){
 
 function render(){renderCats();renderSubs();renderList();renderStats();renderDetail()}
 function choose(name){
- clearTimeout(pollTimer);pollTimer=null;pollCount=0;viewToken++;selection=name;offers=[];remoteHistory=[];remoteLatest=null;insight=null;watchWarning='';fetchMessage='';loading=false;chartPeriod=7;applyPublishedReference(name);
+ clearTimeout(pollTimer);pollTimer=null;pollCount=0;viewToken++;selection=name;offers=[];availableVariants=[];remoteHistory=[];remoteLatest=null;insight=null;watchWarning='';fetchMessage='';loading=false;chartPeriod=7;applyPublishedReference(name);
  render();if(location.protocol!=='file:'){try{history.replaceState(null,'','#'+encodeURIComponent(name))}catch(e){}}
  if(serverReady){loadProduct(name)}
 }
@@ -823,7 +833,7 @@ async function loadProduct(name){
  const ticket=++viewToken;loading=provider;fetchMessage='';renderDetail();
  try{
   const h=await fetch('/api/history?q='+encodeURIComponent(queryFor(name))+'&days=all',{cache:'no-store'});
-  if(h.ok){const data=await h.json();if(ticket===viewToken&&selection===name){if(data.insight)insight=data.insight;if(Array.isArray(data.points)&&data.points.length)remoteHistory=data.points;if(data.latest)remoteLatest=data.latest;if(Array.isArray(data.offers)&&data.offers.length){offers=data.offers;updateQuoteFromOffers(name,offers)}renderDetail()}}
+  if(h.ok){const data=await h.json();if(ticket===viewToken&&selection===name){if(data.insight)insight=data.insight;if(Array.isArray(data.variants))availableVariants=data.variants;if(Array.isArray(data.points)&&data.points.length)remoteHistory=data.points;if(data.latest)remoteLatest=data.latest;if(Array.isArray(data.offers)&&data.offers.length){offers=data.offers;updateQuoteFromOffers(name,offers)}renderDetail()}}
  }catch(e){}
  if(ticket!==viewToken||selection!==name)return;
  if(!provider){loading=false;renderDetail();return}
@@ -837,7 +847,7 @@ async function refreshProduct(name,ticket=viewToken){
   const data=await r.json();if(!r.ok)throw new Error(data.error||'Erro na consulta');
   if(ticket!==viewToken||selection!==name)return;
   if(Array.isArray(data.offers)&&data.offers.length){offers=data.offers.slice(0,30);updateQuoteFromOffers(name,offers)}
-  if(data.history){if(data.history.insight)insight=data.history.insight;if(Array.isArray(data.history.points)&&data.history.points.length)remoteHistory=data.history.points;if(data.history.latest)remoteLatest=data.history.latest}
+  if(data.history){if(data.history.insight)insight=data.history.insight;if(Array.isArray(data.history.variants))availableVariants=data.history.variants;if(Array.isArray(data.history.points)&&data.history.points.length)remoteHistory=data.history.points;if(data.history.latest)remoteLatest=data.history.latest}
   apiSources=Array.isArray(data.sources)?data.sources:[];
   if(data.pending){
     fetchMessage='Bright Data coletando ofertas… resultados de outras fontes já aparecem acima, quando disponíveis.';
@@ -846,7 +856,7 @@ async function refreshProduct(name,ticket=viewToken){
   }
   if(data.cached&&offers.length===0){
     const h=await fetch('/api/history?q='+encodeURIComponent(queryFor(name))+'&days=all',{cache:'no-store'});
-    if(h.ok){const fresh=await h.json();insight=fresh.insight||null;remoteHistory=fresh.points||[];remoteLatest=fresh.latest||null;offers=fresh.offers||[];updateQuoteFromOffers(name,offers)}
+    if(h.ok){const fresh=await h.json();insight=fresh.insight||null;availableVariants=fresh.variants||[];remoteHistory=fresh.points||[];remoteLatest=fresh.latest||null;offers=fresh.offers||[];updateQuoteFromOffers(name,offers)}
   }
   if(!offers.length&&!remoteLatest&&!remoteHistory.length&&!data.pending)fetchMessage=(data.errors||[]).join(' ')||'Nenhuma cotação confiável encontrada.';
   if(data.pending && pollCount<12){
@@ -953,7 +963,7 @@ async function getProvider(){
  try{
   const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),2500);
   const r=await fetch('/api/status',{signal:ctrl.signal});clearTimeout(timer);if(!r.ok)return;
-  const data=await r.json();serverReady=['12.0','10.1','10.0','9.0','8.0','7.0'].includes(data.version);provider=!!data.shopping;
+  const data=await r.json();serverReady=['16.0','12.0','10.1','10.0','9.0','8.0','7.0'].includes(data.version);provider=!!data.shopping;
   $('providerPill').textContent=provider?'◉ '+[data.brightdata?'Bright Data':null,data.mercadolivre?'Mercado Livre':null,data.serpapi_fallback?'SerpApi (reserva)':null].filter(Boolean).join(' + '):'◉ Sem API de preços conectada';
   $('providerPill').classList.toggle('offline',!provider);
   $('storageStatus').textContent=data.storage==='postgres'?'Histórico no PostgreSQL':'Histórico temporário • conectar PostgreSQL';
