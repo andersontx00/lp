@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import price_assurance
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -104,6 +105,9 @@ def parse_bright(data, query, price_parser, matcher, url_checker, image_checker,
         if key in seen:continue
         seen.add(key)
         out.append({'title':title,'price':p,'source':merchant,'url':link,'image_url':image,
+                    'shipping_price':price_assurance.explicit_shipping(row,price_parser),
+                    'pix_price':price_assurance.pix_from_row(row,price_parser,p),
+                    'installments':price_assurance.installment_from_row(row,price_parser),
                     'provider':'brightdata','checked_at':timestamp()})
     return sorted(out,key=lambda x:x['price'])[:35]
 
@@ -124,5 +128,9 @@ def parse_meli(data,query,price_parser,matcher,url_checker,image_checker,timesta
         if key in seen:continue
         seen.add(key)
         out.append({'title':title,'price':price,'source':merchant,'url':link,
-                    'image_url':image_checker(row.get('thumbnail')),'provider':'mercadolivre','checked_at':timestamp()})
+                    'image_url':image_checker(row.get('thumbnail')),
+                    'shipping_price':price_assurance.explicit_shipping(row,price_parser),
+                    'pix_price':price_assurance.pix_from_row(row,price_parser,price),
+                    'installments':price_assurance.installment_from_row(row,price_parser),
+                    'provider':'mercadolivre','checked_at':timestamp()})
     return sorted(out,key=lambda x:x['price'])[:35]
