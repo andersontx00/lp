@@ -542,12 +542,12 @@ function photoMarkup(name,emoji){const photo=catalogImageFor(name);return `<span
 function quoteMarkup(name){const quote=catalogQuoteFor(name);if(!quote||!Number.isFinite(Number(quote.price))||Number(quote.price)<=0)return '<span class="entry-no-price">Consultar preço nas lojas</span>';
  const t=Date.parse(quote.checked_at||''),age=Number.isFinite(t)?Date.now()-t:Infinity;
  const label=age<86400000?'Cotação recente':age<7*86400000?'Última cotação':'Cotação antiga';
- return `<b>${brl(quote.price)}</b><span class="entry-quote-label">${label}</span>`}
+ return `<b>${brl(quote.price)}</b><span class="entry-quote-label">${label}${quote.variant_label?' · '+esc(quote.variant_label):''}</span>`}
 function updateQuoteFromOffers(name,list){if(!Array.isArray(list)||!list.length)return;
  const verified=list.filter(o=>!o.is_seed&&Number.isFinite(Number(o.price))&&Number(o.price)>0&&Number.isFinite(Date.parse(o.checked_at||'')));
  if(!verified.length)return;
  verified.sort((a,b)=>Number(a.price)-Number(b.price));const top=verified[0];
- const data={product:queryFor(name),price:Number(top.price),image_url:(verified.find(o=>/^https:\/\//i.test(o.image_url||''))||{}).image_url||'',merchant:top.source||'',checked_at:top.checked_at};
+ const data={product:queryFor(name),price:Number(top.price),variant_label:top.variant_label||'',variant_key:top.variant_key||'',image_url:(verified.find(o=>/^https:\/\//i.test(o.image_url||''))||{}).image_url||'',merchant:top.source||'',checked_at:top.checked_at};
  catalogQuotes.set(norm(queryFor(name)),data);if(data.image_url)photoCache.set(queryFor(name),data.image_url);
  renderList();
 }
@@ -712,10 +712,10 @@ function storeComparison(rows){
  const stamp=mostRecent.length?new Date(Math.max(...mostRecent)).toLocaleString('pt-BR'):'Horário não informado';
  return `<div class="r5-shop-chart" role="img" aria-label="Comparação dos preços por loja">
   ${rows.slice(0,16).map((o,i)=>{
-   const val=Number(o.price), width=Math.max(12,(val/hi)*100);
-   return `<div class="r5-offer-row ${i===0?'cheapest':''}"><span class="merchant" title="${esc(o.source||'Loja')}">${esc(o.source||'Loja')}${i===0?'<span class="r5-badge">'+(offerSortMode==='total'?'MENOR TOTAL CONHECIDO':offerSortMode==='pix'?'MENOR PIX CONFIRMADO':'MENOR ANUNCIADO')+'</span>':''}</span><div class="bar-bg"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="amount">${brl(val)}</span></div>`;
+   const val=Number(o.price), width=Math.max(12,(val/hi)*100),shownValue=offerSortMode==='pix'&&o.pix_price!=null?Number(o.pix_price):offerSortMode==='total'&&o.total_known!=null?Number(o.total_known):val;
+   return `<div class="r5-offer-row ${i===0?'cheapest':''}"><span class="merchant" title="${esc(o.source||'Loja')}">${esc(o.source||'Loja')}${i===0?'<span class="r5-badge">'+(offerSortMode==='total'?'MENOR TOTAL CONHECIDO':offerSortMode==='pix'?'MENOR PIX CONFIRMADO':'MENOR ANUNCIADO')+'</span>':''}</span><div class="bar-bg"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="amount">${brl(shownValue)}${shownValue===val?'':'*'}</span></div>`;
   }).join('')}
-  <div class="r5-status">${rows.length} oferta(s) na última consulta • ${esc(stamp)}. Preço anunciado antes de frete e cupons, salvo quando a fonte confirmar o custo de envio.</div><div class="r9-cost">${rows.slice(0,7).map(o=>`${esc(o.source)}: ${o.shipping_price==null?'<span class=\"r9-ship-unknown\">frete não informado</span>':'frete '+brl(o.shipping_price)+' • custo '+brl(Number(o.price)+Number(o.shipping_price))}`).join(' · ')}</div>
+  <div class="r5-status">${rows.length} oferta(s) na última consulta • ${esc(stamp)}. Barras mostram ${offerSortMode==='pix'?'Pix quando confirmado':offerSortMode==='total'?'total conhecido com frete':'preço anunciado'}. *Valores com modalidade distinta identificada na oferta; nunca estimamos frete ou descontos.</div><div class="r9-cost">${rows.slice(0,7).map(o=>`${esc(o.source)}: ${o.shipping_price==null?'<span class=\"r9-ship-unknown\">frete não informado</span>':'frete '+brl(o.shipping_price)+' • custo '+brl(Number(o.price)+Number(o.shipping_price))}`).join(' · ')}</div>
  </div>`;
 }
 
@@ -793,7 +793,7 @@ function renderDetail(){
  const mine=persist.saved.includes(p.name); const photo=getPhoto(); const photoRecord=window.RadarPrecoProductImages?.get(norm(p.name));const photoCredit=photoRecord&&photo===photoRecord.url?`<a class="r11-photo-credit" href="${esc(photoRecord.source)}" target="_blank" rel="noopener noreferrer">Foto: ${esc(photoRecord.author)} • ${esc(photoRecord.license)} (ver origem)</a>`:''; const photoBlock=photo?`<img src="${esc(photo)}" alt="Foto do produto ${esc(p.name)}" loading="lazy" referrerpolicy="no-referrer">`:`<span class="r6-fallback" aria-label="Imagem indisponível">${esc(p.icon||'📦')}</span>`;
  const currentText=shown?brl(shown.price):(loading?'Consultando…':'Preço não disponível');
  const currentSub=shown?`Loja: ${esc(shown.source||shown.series)} • ${shown.at?new Date(shown.at).toLocaleString('pt-BR'):'Data não informada'}`:(loading?'Pesquisando ofertas sem abrir outra aba…':'Ainda não há valor confirmado para este produto. A consulta requer o servidor publicado com a API habilitada.');
- const quoteState=shown?(valid.some(x=>x.is_seed)?'Referência publicada (não é cotação ao vivo)':shown.at&&Date.now()-new Date(shown.at).getTime()>86400000?'Última cotação disponível':'Menor preço encontrado'):'Aguardando fonte de preços';
+ const quoteState=shown?(valid.some(x=>x.is_seed)?'Referência publicada (não é cotação ao vivo)':shown.at&&Date.now()-new Date(shown.at).getTime()>86400000?'Última cotação disponível':'Menor preço anunciado da variante indicada'):'Aguardando fonte de preços';
  const high=valid.length?Math.max(...valid.map(x=>Number(x.price))):null;
  const low=valid.length?Number(valid[0].price):null;
  const savings=high!=null&&low!=null?high-low:null;
