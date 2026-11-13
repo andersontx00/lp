@@ -1034,6 +1034,15 @@ def automatic_watch_loop():
         if not configured():continue
         day=datetime.now(timezone.utc).date().isoformat()
         if day!=daily_day:daily_day=day;completed=0
+        # The persisted quota prevents an app restart from resetting paid-request caps.
+        try:
+            with lock,db_conn() as cn:
+                charged=cn.execute("""SELECT COUNT(*) FROM lookup_quota
+                    WHERE client_key='automatic' AND at>=?""",(day,)).fetchone()[0]
+            completed=max(completed,int(charged))
+        except Exception as exc:
+            print('AUTO_WATCH_BUDGET error_type=%s' % type(exc).__name__,flush=True)
+            continue
         if completed>=2:continue
         try:
             with lock,db_conn() as cn:
