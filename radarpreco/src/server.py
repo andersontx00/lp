@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import providers
 import alerts_engine
-import accounts, variant_rules, pg_store, offer_quality, product_identity, price_assurance
+import accounts, variant_rules, pg_store, offer_quality, product_identity, price_assurance, variant_identity, audit_runtime
 ROOT=Path(__file__).resolve().parent
 
 
@@ -105,7 +105,7 @@ def match_score(wanted,candidate):
     """Match title identity, required model and capacity; never cross FE/Ultra or 128/256GB."""
     wanted=product_identity.canonical_query(wanted)
     a=words(wanted);b=words(candidate)
-    if (not a or not b or variant_rules.incompatible(wanted,candidate)
+    if (not a or not b or not variant_identity.compare(wanted,candidate)[0] or variant_rules.incompatible(wanted,candidate)
             or not offer_quality.device_offer_ok(wanted,candidate)
             or not product_identity.exact_model_ok(wanted,candidate)):
         return 0.0
@@ -271,6 +271,38 @@ def db_conn():
     finally:
         cn.close()
 
+def initialize_variants_and_audit(cn):
+    """Preserve old offers and migrate valid rows to variant-aware storage."""
+    cn.execute('''CREATE TABLE IF NOT EXISTS offer_variants (
+        product TEXT NOT NULL, merchant TEXT NOT NULL, variant_key TEXT NOT NULL,
+        title TEXT NOT NULL, price DOUBLE PRECISION NOT NULL, url TEXT NOT NULL,
+        checked_at TEXT NOT NULL, image_url TEXT NOT NULL DEFAULT '',
+        provider TEXT NOT NULL DEFAULT 'serpapi',
+        shipping_price DOUBLE PRECISION, pix_price DOUBLE PRECISION,
+        installments TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(product,merchant,variant_key))''')
+    cn.execute('CREATE INDEX IF NOT EXISTS by_variant_date ON offer_variants(product,checked_at)')
+    audit_runtime.init_schema(cn,postgres=USE_POSTGRES)
+    existing=cn.execute('SELECT COUNT(*) FROM offer_variants').fetchone()[0]
+    if not existing:
+        legacy=cn.execute('''SELECT product,merchant,title,price,url,checked_at,
+                image_url,provider,shipping_price,pix_price,installments
+                FROM offers LIMIT 1000''').fetchall()
+        for record in legacy:
+            row=dict(record)
+            title=str(row.get('title') or '')
+            name=str(row.get('product') or '')
+            if price_assurance.classify(name,title,match_score(name,title))['status']=='rejected':continue
+            key=variant_identity.key(name,title)
+            cn.execute('''INSERT OR IGNORE INTO offer_variants
+                (product,merchant,variant_key,title,price,url,checked_at,image_url,
+                 provider,shipping_price,pix_price,installments)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (name,row['merchant'],key,title,row['price'],row['url'],
+                 row['checked_at'],row['image_url'],row['provider'],
+                 row['shipping_price'],row['pix_price'],row['installments']))
+
+
 def initialize():
     if USE_POSTGRES:
         with lock,db_conn() as cn:
@@ -284,6 +316,7 @@ def initialize():
                 title TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,
                 reporter TEXT NOT NULL)''')
             cn.execute('CREATE INDEX IF NOT EXISTS offer_reports_at ON offer_reports(created_at)')
+            initialize_variants_and_audit(cn)
         return
     with lock,db_conn() as cn:
         cn.execute('''CREATE TABLE IF NOT EXISTS prices (
@@ -320,9 +353,10 @@ def initialize():
             merchant TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,
             created_at TEXT NOT NULL,reporter TEXT NOT NULL)''')
         cn.execute('CREATE INDEX IF NOT EXISTS offer_reports_at ON offer_reports(created_at)')
+        initialize_variants_and_audit(cn)
 
 def store_offer_cache(name, items, at=None):
-    """Keep only offers observed together, one lowest listing per merchant."""
+    """Keep lowest comparable offers per merchant AND variant."""
     stamp=at or timestamp()
     grouped={}
     for item in items:
@@ -331,20 +365,30 @@ def store_offer_cache(name, items, at=None):
         if not merchant or not price:continue
         title=str(item.get('title') or '')
         if price_assurance.classify(name,title,match_score(name,title))['status']=='rejected':continue
-        key=normalize(merchant)
+        variant_key=variant_identity.key(name,title)
+        key=normalize(merchant)+'|'+variant_key
         if key not in grouped or price<grouped[key]['price']:
-            grouped[key]=price_assurance.enrich({**item,'source':merchant,'price':price,'checked_at':str(item.get('checked_at') or stamp)})
+            grouped[key]=price_assurance.enrich({**item,'source':merchant,'price':price,
+                'checked_at':str(item.get('checked_at') or stamp),
+                'variant_key':variant_key,
+                'variant_label':variant_identity.describe(name,title)})
     with lock,db_conn() as cn:
-        cn.execute('DELETE FROM offers WHERE product=?',(name,))
+        cn.execute('DELETE FROM offer_variants WHERE product=?',(name,))
         for item in grouped.values():
-            cn.execute('INSERT INTO offers(product,merchant,title,price,url,checked_at,image_url,provider,shipping_price,pix_price,installments) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                (name,item['source'],str(item.get('title',''))[:200],item['price'],safe_url(item.get('url')),str(item.get('checked_at') or stamp),image_url(item.get('image_url')),str(item.get('provider') or 'serpapi')[:30],item.get('shipping_price'),item.get('pix_price'),item.get('installments','')))
+            cn.execute('''INSERT INTO offer_variants
+                (product,merchant,variant_key,title,price,url,checked_at,
+                 image_url,provider,shipping_price,pix_price,installments)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (name,item['source'],item['variant_key'],str(item.get('title',''))[:200],
+                 item['price'],safe_url(item.get('url')),str(item.get('checked_at') or stamp),
+                 image_url(item.get('image_url')),str(item.get('provider') or 'serpapi')[:30],
+                 item.get('shipping_price'),item.get('pix_price'),item.get('installments','')))
     return list(sorted(grouped.values(),key=lambda x:x['price']))
 
 
 def read_offers(name):
     with lock,db_conn() as cn:
-        rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price,pix_price,installments FROM offers WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
+        rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price,pix_price,installments,variant_key FROM offer_variants WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
     results=[]
     trusted=quality_cutoff(name)
     for row in rows:
@@ -352,6 +396,7 @@ def read_offers(name):
         if trusted and item['checked_at']<trusted:continue
         title=item.get('title') or ''
         if price_assurance.classify(name,title,match_score(name,title))['status']=='rejected':continue
+        item['variant_label']=variant_identity.describe(name,title)
         results.append(price_assurance.enrich(item))
     return results
 
@@ -593,7 +638,7 @@ def catalog_cards(limit=450):
     cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat(timespec='seconds')
     with lock,db_conn() as cn:
         rows=cn.execute('''SELECT product,merchant,title,price,checked_at,image_url,shipping_price
-          FROM offers WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 2500''',(cutoff,)).fetchall()
+          FROM offer_variants WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 2500''',(cutoff,)).fetchall()
     found={}
     for row in rows:
         item=dict(row);name=item.get('product')
@@ -610,21 +655,21 @@ def catalog_cards(limit=450):
             found[name]=item
         elif not existing.get('image_url') and item.get('image_url'):
             existing['image_url']=item['image_url']
-    return [price_assurance.enrich(o) for o in list(found.values())[:limit]]
+    return [price_assurance.enrich({**o,'variant_label':variant_identity.describe(o.get('product',''),o.get('title',''))}) for o in list(found.values())[:limit]]
 
 def highlights(limit=12):
     """Genuine fresh observations only. No fabricated product prices."""
     cutoff=(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds')
     with lock,db_conn() as cn:
         rows=cn.execute('''SELECT product,merchant,title,price,checked_at,image_url,url,shipping_price
-          FROM offers WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 300''',(cutoff,)).fetchall()
+          FROM offer_variants WHERE checked_at>=? ORDER BY checked_at DESC LIMIT 300''',(cutoff,)).fetchall()
     found={}
     for row in rows:
         data=dict(row);name=data['product']
         if quality_cutoff(name) and data['checked_at']<quality_cutoff(name):continue
         if price_assurance.classify(name,str(data.get('title') or ''),match_score(name,str(data.get('title') or '')))['status']=='rejected':continue
         if name not in found or data['price']<found[name]['price']:found[name]=data
-    return [price_assurance.enrich(o) for o in sorted(found.values(),key=lambda o:o['price'])[:limit]]
+    return [price_assurance.enrich({**o,'variant_label':variant_identity.describe(o.get('product',''),o.get('title',''))}) for o in sorted(found.values(),key=lambda o:o['price'])[:limit]]
 
 class Handler(BaseHTTPRequestHandler):
     server_version='RadarPreco/10.1'
