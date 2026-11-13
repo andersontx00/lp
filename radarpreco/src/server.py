@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import providers
 import alerts_engine
-import accounts, variant_rules, pg_store, offer_quality
+import accounts, variant_rules, pg_store, offer_quality, product_identity
 ROOT=Path(__file__).resolve().parent
 
 
@@ -54,7 +54,7 @@ def timestamp():return datetime.now(timezone.utc).isoformat(timespec='seconds')
 def clean_query(q):
     q=str(q).strip()
     if len(q)<2 or len(q)>160 or any(ord(c)<32 for c in q):raise ValueError('Nome deve ter entre 2 e 160 caracteres.')
-    return q
+    return product_identity.canonical_query(q)
 
 def normalize(s):
     s=unicodedata.normalize('NFKD',str(s or ''))
@@ -98,7 +98,10 @@ def words(raw):
 def match_score(wanted,candidate):
     """Match title identity, required model and capacity; never cross FE/Ultra or 128/256GB."""
     a=words(wanted);b=words(candidate)
-    if not a or not b or variant_rules.incompatible(wanted,candidate) or not offer_quality.device_offer_ok(wanted,candidate):return 0.0
+    if (not a or not b or variant_rules.incompatible(wanted,candidate)
+            or not offer_quality.device_offer_ok(wanted,candidate)
+            or not product_identity.exact_model_ok(wanted,candidate)):
+        return 0.0
     sa,sb=set(a),set(b)
     # Every model number in the requested query must be present (accept 220 V / 220V).
     required=[t for t in a if re.search(r'\d',t)]
