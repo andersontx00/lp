@@ -2,7 +2,7 @@
 (()=>{
 'use strict';
 const list=document.getElementById('list');if(!list)return;
-const KEY='radarpreco_images_v2',DAY=86400000,cache=new Map(),miss=new Map(),queue=[],pending=new Set();
+const KEY='radarpreco_images_v3',DAY=86400000,cache=new Map(),miss=new Map(),queue=[],pending=new Set();
 let running=0,count=0,lastStart=0,timer=null;
 const normalize=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
 const valid=u=>typeof u==='string'&&/^https:\/\/[^\s<>"']+$/i.test(u)&&u.length<2000;
@@ -10,6 +10,13 @@ const generic=new Set(['ssd','memoria','placa','mouse','headset','monitor','note
 const special=new Set(['fe','pro','ultra','max','plus','mini','air','x','ti','super','se','tkl','lxs','oled','xt']);
 function correctModel(name,title){
  const wanted=normalize(name),asset=normalize(title);
+ const shoe=wanted.match(/\bolympikus corre ([345])\b/);
+ if(shoe){
+   const numbers=[...asset.matchAll(/\bcorre\s*([345])\b/g)];
+   if(!numbers.length||numbers.some(x=>x[1]!==shoe[1]))return false;
+   const wrong=asset.match(/\bolympikus (?:eleva|dynamic|index|venus|flit)\b/);
+   if(wrong && wrong.index < numbers[0].index)return false;
+ }
  const isDevice=/\b(?:iphone|smartphone|celular|galaxy (?:a\d+|s\d+|m\d+|tab|z fold|z flip)|ipad|tablet|redmi|poco|moto [a-z]\d+)\b/.test(wanted);
  const explicitAccessory=/^(?:kit |combo |pack |conjunto )?(?:capa|capinha|case|pelicula|carregador|cabo|tela|display|bateria|adaptador|acessorio)/.test(wanted);
  const accessory=/\b(?:capa|capas|capinha|capinhas|case|cases|cover|pelicula|peliculas|carregador|carregadores|suporte|tela|display|bateria|bolsa|vidro|protetor|adesivo|cabo|adaptador|acessorio|acessorios|mockup|miniatura|replica|dummy)\b/.test(asset);
