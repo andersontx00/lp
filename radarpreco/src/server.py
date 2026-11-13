@@ -6,7 +6,7 @@ historical values. For a public hosted service add authentication and robust
 rate limits, persistent disk/database, schedule worker, and protection.
 """
 from __future__ import annotations
-import json, os, re, sqlite3, threading, time, unicodedata
+import json, os, re, sqlite3, threading, time, unicodedata, hashlib
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import providers
 import alerts_engine
-import accounts, variant_rules, pg_store, offer_quality, product_identity
+import accounts, variant_rules, pg_store, offer_quality, product_identity, price_assurance
 ROOT=Path(__file__).resolve().parent
 
 
@@ -155,7 +155,7 @@ def extract_offers(response,wanted):
         url=safe_url(row.get('link') or row.get('product_link'))
         if not title or price is None or not url:continue
         score=match_score(wanted,title)
-        if score<0.72:continue
+        if price_assurance.classify(wanted,title,score)['status']=='rejected':continue
         txt=normalize(title+' '+str(row.get('second_hand_condition') or '')+' '+str(row.get('price') or ''))
         if any(s in txt for s in ('usado','seminovo','recondicionado','refurbished','entrada +','mensalidade','aluguel','/mes','/mês','/mo','por mes','por mês')):continue
         if row.get('installment') and re.search(r'(?:/|\bpor\s+)(?:mo|mes|m[eê]s)\b',str(row.get('price','')),re.I):continue
@@ -167,6 +167,8 @@ def extract_offers(response,wanted):
         if key in seen:continue
         seen.add(key)
         arr.append({'title':title,'price':price,'source':source,'url':url,'image_url':thumb,'shipping_price':shipping_cost(row),
+            'pix_price':price_assurance.pix_from_row(row,numeric_price,price),
+            'installments':price_assurance.installment_from_row(row,numeric_price),
             'product_id':str(row.get('product_id') or '')[:60],
             'checked_at':timestamp(),'match_score':round(score,3)})
     arr.sort(key=lambda x:x['price'])
@@ -275,6 +277,13 @@ def initialize():
             pg_store.initialize(cn)
             alerts_engine.init_schema(cn,postgres=True)
             accounts.init_schema(cn,postgres=True)
+            cn.execute('ALTER TABLE offers ADD COLUMN IF NOT EXISTS pix_price DOUBLE PRECISION')
+            cn.execute("ALTER TABLE offers ADD COLUMN IF NOT EXISTS installments TEXT NOT NULL DEFAULT ''")
+            cn.execute('''CREATE TABLE IF NOT EXISTS offer_reports (
+                id BIGSERIAL PRIMARY KEY,product TEXT NOT NULL,merchant TEXT NOT NULL,
+                title TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,
+                reporter TEXT NOT NULL)''')
+            cn.execute('CREATE INDEX IF NOT EXISTS offer_reports_at ON offer_reports(created_at)')
         return
     with lock,db_conn() as cn:
         cn.execute('''CREATE TABLE IF NOT EXISTS prices (
@@ -303,6 +312,14 @@ def initialize():
         accounts.init_schema(cn)
         if 'shipping_price' not in {r[1] for r in cn.execute('PRAGMA table_info(offers)').fetchall()}:
             cn.execute('ALTER TABLE offers ADD COLUMN shipping_price REAL')
+        columns={r[1] for r in cn.execute('PRAGMA table_info(offers)').fetchall()}
+        if 'pix_price' not in columns:cn.execute('ALTER TABLE offers ADD COLUMN pix_price REAL')
+        if 'installments' not in columns:cn.execute("ALTER TABLE offers ADD COLUMN installments TEXT NOT NULL DEFAULT ''")
+        cn.execute('''CREATE TABLE IF NOT EXISTS offer_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, product TEXT NOT NULL,
+            merchant TEXT NOT NULL,title TEXT NOT NULL,reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,reporter TEXT NOT NULL)''')
+        cn.execute('CREATE INDEX IF NOT EXISTS offer_reports_at ON offer_reports(created_at)')
 
 def store_offer_cache(name, items, at=None):
     """Keep only offers observed together, one lowest listing per merchant."""
@@ -313,29 +330,29 @@ def store_offer_cache(name, items, at=None):
         price=numeric_price(item.get('price'))
         if not merchant or not price:continue
         title=str(item.get('title') or '')
-        if not offer_quality.device_offer_ok(name,title) or match_score(name,title)<0.72:continue
+        if price_assurance.classify(name,title,match_score(name,title))['status']=='rejected':continue
         key=normalize(merchant)
         if key not in grouped or price<grouped[key]['price']:
-            grouped[key]={**item, 'source':merchant,'price':price,'checked_at':str(item.get('checked_at') or stamp)}
+            grouped[key]=price_assurance.enrich({**item,'source':merchant,'price':price,'checked_at':str(item.get('checked_at') or stamp)})
     with lock,db_conn() as cn:
         cn.execute('DELETE FROM offers WHERE product=?',(name,))
         for item in grouped.values():
-            cn.execute('INSERT INTO offers(product,merchant,title,price,url,checked_at,image_url,provider,shipping_price) VALUES (?,?,?,?,?,?,?,?,?)',
-                (name,item['source'],str(item.get('title',''))[:200],item['price'],safe_url(item.get('url')),str(item.get('checked_at') or stamp),image_url(item.get('image_url')),str(item.get('provider') or 'serpapi')[:30],item.get('shipping_price')))
+            cn.execute('INSERT INTO offers(product,merchant,title,price,url,checked_at,image_url,provider,shipping_price,pix_price,installments) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                (name,item['source'],str(item.get('title',''))[:200],item['price'],safe_url(item.get('url')),str(item.get('checked_at') or stamp),image_url(item.get('image_url')),str(item.get('provider') or 'serpapi')[:30],item.get('shipping_price'),item.get('pix_price'),item.get('installments','')))
     return list(sorted(grouped.values(),key=lambda x:x['price']))
 
 
 def read_offers(name):
     with lock,db_conn() as cn:
-        rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price FROM offers WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
+        rows=cn.execute('SELECT merchant AS source,title,price,url,checked_at,image_url,provider,shipping_price,pix_price,installments FROM offers WHERE product=? AND checked_at>=? ORDER BY price ASC LIMIT 50',(name,(datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'))).fetchall()
     results=[]
     trusted=quality_cutoff(name)
     for row in rows:
         item=dict(row)
         if trusted and item['checked_at']<trusted:continue
         title=item.get('title') or ''
-        if not offer_quality.device_offer_ok(name,title) or match_score(name,title)<0.72:continue
-        results.append(item)
+        if price_assurance.classify(name,title,match_score(name,title))['status']=='rejected':continue
+        results.append(price_assurance.enrich(item))
     return results
 
 
@@ -368,7 +385,9 @@ def read_history(name,days=7):
     with lock,db_conn() as cn:
         insight=alerts_engine.opportunity(cn,name,offers,minimum_at=quality_start)
     return {'query':name,'days':days,'points':[dict(row) for row in rows],'insight':insight,
-           'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),'')}
+           'latest':dict(latest) if latest else None,'offers':offers,'checked_at':timestamp(),'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','image_url':next((o.get('image_url','') for o in offers if o.get('image_url')),''),
+            'audit':price_assurance.audit_summary(offers),
+            'history_days':len(set(str(r['at'])[:10] for r in rows))}
 
 def job_get(name):
     with lock, db_conn() as cn:
@@ -390,7 +409,7 @@ def record_merged(name,new_offers,stamp=None):
     """Merge the responses from both providers; never overwrite a source during a pending job."""
     new_offers=[o for o in new_offers
                 if offer_quality.device_offer_ok(name,str(o.get('title') or ''))
-                and match_score(name,str(o.get('title') or ''))>=0.72]
+                and price_assurance.classify(name,str(o.get('title') or ''),match_score(name,str(o.get('title') or '')))['status']=='title_matched']
     if not new_offers:return read_offers(name)
     stamp=stamp or timestamp()
     # Keep only fresh old offers from other sources, never retain an outdated
@@ -559,7 +578,7 @@ def catalog_cards(limit=450):
         item=dict(row);name=item.get('product')
         if not name or not numeric_price(item.get('price')):continue
         if quality_cutoff(name) and item['checked_at']<quality_cutoff(name):continue
-        if match_score(name,str(item.get('title') or ''))<0.72:continue
+        if price_assurance.classify(name,str(item.get('title') or ''),match_score(name,str(item.get('title') or '')))['status']=='rejected':continue
         existing=found.get(name)
         if existing is None:
             found[name]=item
@@ -570,7 +589,7 @@ def catalog_cards(limit=450):
             found[name]=item
         elif not existing.get('image_url') and item.get('image_url'):
             existing['image_url']=item['image_url']
-    return list(found.values())[:limit]
+    return [price_assurance.enrich(o) for o in list(found.values())[:limit]]
 
 def highlights(limit=12):
     """Genuine fresh observations only. No fabricated product prices."""
@@ -582,9 +601,9 @@ def highlights(limit=12):
     for row in rows:
         data=dict(row);name=data['product']
         if quality_cutoff(name) and data['checked_at']<quality_cutoff(name):continue
-        if match_score(name,str(data.get('title') or ''))<0.72:continue
+        if price_assurance.classify(name,str(data.get('title') or ''),match_score(name,str(data.get('title') or '')))['status']=='rejected':continue
         if name not in found or data['price']<found[name]['price']:found[name]=data
-    return sorted(found.values(),key=lambda o:o['price'])[:limit]
+    return [price_assurance.enrich(o) for o in sorted(found.values(),key=lambda o:o['price'])[:limit]]
 
 class Handler(BaseHTTPRequestHandler):
     server_version='RadarPreco/10.1'
@@ -715,9 +734,10 @@ class Handler(BaseHTTPRequestHandler):
             self.respond({'version':'12.0','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
-             'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','auth':'email_password',
+             'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,'checks_best_effort':True,'automatic_daily_cap':2,'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','auth':'email_password',
              'historical_google':bool(SERPAPI_KEY),'historical_amazon':bool(KEEPA_KEY),
-             'history_note':'Histórico anterior depende de cobertura do provedor. Não são gerados preços simulados.'});return
+             'history_note':'Histórico anterior depende de cobertura do provedor. Não são gerados preços simulados.',
+              'quality_policy':'Somente anúncios identificados pelo título; código GTIN não confirmado.'});return
         if path.path=='/api/history':
             try:name=clean_query((parse_qs(path.query).get('q') or [''])[0])
             except ValueError as e:self.respond({'error':str(e)},400);return
