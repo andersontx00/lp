@@ -1049,6 +1049,10 @@ def run_smoke_query():
         print('RADAR_SMOKE status=error category='+type(exc).__name__,flush=True)
 
 def main():
+    if os.environ.get('RADAR_INTEGRATION_SELFTEST')=='1':
+        import integration_selftest
+        passed=integration_selftest.run(sys.modules[__name__])
+        print('RADAR_DB_INTEGRATION_TEST passed=%d' % passed,flush=True)
     if os.environ.get('RADAR_QUALITY_SELFTEST')=='1':
         import quality_selftest
         print('RADAR_QUALITY_TEST passed=%d' % quality_selftest.run(sys.modules[__name__]),flush=True)
