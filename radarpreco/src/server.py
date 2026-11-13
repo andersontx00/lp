@@ -93,10 +93,12 @@ def words(raw):
     s=re.sub(r'(?<=\d)\s+(?=(?:gb|tb|v|hz|w|l)\b)', '',s)
     s=re.sub(r'\bs(2[0-9])\s*(fe|ultra|plus)\b',r's\1 \2',s)
     s=re.sub(r'\b(\d+)\s*servi[cç]os?\b',r'\1servicos',s)
+    s=re.sub(r'\bcorre(?=[345]\b)', 'corre ', s)
     return re.findall(r'[a-z0-9]+',s)
 
 def match_score(wanted,candidate):
     """Match title identity, required model and capacity; never cross FE/Ultra or 128/256GB."""
+    wanted=product_identity.canonical_query(wanted)
     a=words(wanted);b=words(candidate)
     if (not a or not b or variant_rules.incompatible(wanted,candidate)
             or not offer_quality.device_offer_ok(wanted,candidate)
