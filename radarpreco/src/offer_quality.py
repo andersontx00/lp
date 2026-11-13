@@ -89,5 +89,8 @@ def device_offer_ok(wanted: str, candidate_title: str) -> bool:
 
 
 def minimum_trusted_at(query: str) -> str | None:
-    """Older device observations lack titles and cannot be audited."""
-    return DEVICE_REBASE_AT if kind_of(query) else None
+    """Never use pre-validation snapshots whose source listing title is lost."""
+    from product_identity import minimum_trusted_at as identity_cutoff
+    global_cutoff=identity_cutoff(query)
+    phone_cutoff=DEVICE_REBASE_AT if kind_of(query) else None
+    return max(global_cutoff or '',phone_cutoff or '') or None
