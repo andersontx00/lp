@@ -180,7 +180,7 @@ def store_drop_alerts(cn,product,new_offers,now=None,minimum_at=None):
                 (device,product,merchant,variant))
     return count
 
-def opportunity(cn,product,offers,now=None,minimum_at=None):
+def opportunity(cn,product,offers,now=None,minimum_at=None,variant_key=None):
     """Compare today's fresh lowest offer to median of past *distinct* days.
 
     Days are aggregated to the best offer on that day; repeatedly fetched
@@ -199,10 +199,14 @@ def opportunity(cn,product,offers,now=None,minimum_at=None):
     best=round(min(current),2)
     since=(current_time-timedelta(days=365)).isoformat(timespec='seconds')
     if minimum_at:since=max(since,minimum_at)
-    records=cn.execute('''SELECT price,at FROM prices WHERE product=? AND kind IN ('snapshot','historical')
+    records=cn.execute('''SELECT series,kind,price,at FROM prices WHERE product=? AND kind IN ('snapshot','historical')
        AND at>=? ORDER BY at ASC LIMIT 25000''',(product,since)).fetchall()
     by_date={}
     for rec in records:
+        # Legacy historical points lack reliable variant identifiers.
+        # Never use them to score today's offer as a sale.
+        if rec['kind']!='snapshot':continue
+        if variant_key and not str(rec['series']).endswith(' • '+variant_key):continue
         at=parse_at(rec['at'])
         if not at or at>=current_time or at.date()>=current_time.date():continue
         try:price=float(rec['price'])
