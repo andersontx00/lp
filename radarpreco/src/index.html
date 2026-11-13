@@ -392,6 +392,28 @@ button{transition:background .2s ease,border-color .2s ease,transform .2s ease}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important}}
 
 </style>
+<style id="rp16-quality-style">
+.searchbox{position:relative;overflow:visible!important}
+#rp-model-suggestions[hidden]{display:none}
+#rp-model-suggestions{position:absolute;z-index:999;left:0;right:0;top:calc(100% + 8px);max-height:min(65vh,385px);overflow-y:auto;border:1px solid #426389;background:#0b1b32;border-radius:17px;box-shadow:0 22px 55px #020817cc;padding:7px}
+#rp-model-suggestions button{display:flex;width:100%;align-items:center;gap:11px;text-align:left;background:transparent;color:#e7f2ff;padding:10px;border-radius:12px;border:1px solid transparent;cursor:pointer}
+#rp-model-suggestions button:hover,#rp-model-suggestions button.active{background:#1c3858;border-color:#406e9c}
+#rp-model-suggestions strong{display:block;font-size:13px;line-height:1.25}
+#rp-model-suggestions small{display:block;font-size:10.5px;color:#a7c1e2;margin-top:3px}
+.rp-suggest-icon{flex:0 0 40px;width:40px;height:40px;display:grid;place-items:center;background:#1b3655;border:1px solid #315472;border-radius:12px;font-size:21px}
+.rp-suggest-chevron{margin-left:auto;color:#94b9e9;font-size:22px}
+.rp-offer-assurance{font-size:11px;font-weight:750;color:#9de0bf;margin-top:5px}
+.rp-offer-details{display:flex;gap:6px 12px;flex-wrap:wrap;margin-top:7px;color:#bed1eb;font-size:11px;line-height:1.5}
+.rp-offer-details span{display:inline-flex;align-items:center;gap:3px}
+.rp-offer-details .rp-freight-unknown{color:#ffc98b}
+.rp-audit-note{padding:12px 14px;border:1px solid #355b7e;border-radius:13px;background:#132942;color:#b6cdec;font-size:12px;line-height:1.6;margin:12px 0}
+.rp-audit-note strong{color:#e7f4ff}
+.rp-report-button{margin-top:5px;background:#20334c!important;border:1px solid #49637c!important;color:#d8e5f6!important;font-size:11px!important;border-radius:8px!important;padding:7px 9px!important}
+.rp-report-button:focus-visible{outline:3px solid #9bbfff}
+.rp-evidence{font-size:11px;color:#9eb6d5;margin:7px 0 12px}
+.rp-cost-row{padding:8px 0;font-size:11px;color:#b7c9df;line-height:1.55}
+@media(max-width:760px){#rp-model-suggestions{max-height:min(55vh,350px)}.offer{gap:8px}.rp-offer-details{gap:6px}}
+</style>
 </head>
 <body>
 <div class="layout">
@@ -596,8 +618,30 @@ function trendText(points){
 }
 
 function offerHTML(o,i){
- const validUrl=/^https:\/\//i.test(o.url||'')?o.url:'';
- return `<div class="offer">${/^https:\/\//i.test(o.image_url||'')?`<img class="r6-offerphoto" loading="lazy" src="${esc(o.image_url)}" alt="">`:''}<div style="min-width:0"><div class="offer-name">${esc(o.title||'Oferta')}</div><div class="offer-src">${esc(o.source||'Loja')} ${o.provider?'• '+esc(({brightdata:'Bright Data',mercadolivre:'Mercado Livre',serpapi:'SerpApi'})[o.provider]||o.provider):''} • ${o.checked_at?'Consulta '+new Date(o.checked_at).toLocaleString('pt-BR'):'Verifique condição, variante e frete'}</div></div><div><div class="offer-price">${brl(o.price)}</div><div class="offer-actions">${validUrl?`<a href="${esc(validUrl)}" target="_blank" rel="noopener noreferrer">${o.is_seed?'Ver fonte ↗':'Ir à loja ↗'}</a>`:''}<button data-observe="${i}">Salvar</button></div></div></div>`;
+  const validUrl=/^https:\/\//i.test(o.url||'')?o.url:'';
+  const hasShip=o.shipping_price!==null&&o.shipping_price!==undefined&&Number.isFinite(Number(o.shipping_price))&&Number(o.shipping_price)>=0;
+  const ship=hasShip?Number(o.shipping_price):null;
+  const hasPix=o.pix_price!==null&&o.pix_price!==undefined&&Number.isFinite(Number(o.pix_price))&&Number(o.pix_price)>0&&Number(o.pix_price)<=Number(o.price);
+  const pix=hasPix?Number(o.pix_price):null;
+  const total=hasShip?Number(o.price)+ship:null;
+  const quality=o.quality_status==='title_matched'?'✓ Modelo identificado pelo título':'Identidade do modelo não confirmada';
+  const stamp=o.checked_at&&Number.isFinite(Date.parse(o.checked_at))?new Date(o.checked_at).toLocaleString('pt-BR'):'Data não confirmada';
+  const metadata=[
+    hasPix?'<span>Pix informado: <b>'+brl(pix)+'</b></span>':'',
+    o.installments?'<span>Parcelamento informado: '+esc(o.installments)+'</span>':'',
+    hasShip?'<span>Frete anunciado: '+brl(ship)+'</span>':'<span class="rp-freight-unknown">Frete não informado</span>',
+    total!==null?'<span>Soma anunciada (produto + frete): <b>'+brl(total)+'</b></span>':''
+  ].filter(Boolean).join('');
+  return '<div class="offer">'+
+   (/^https:\/\//i.test(o.image_url||'')?'<img class="r6-offerphoto" loading="lazy" src="'+esc(o.image_url)+'" alt="">':'')+
+   '<div style="min-width:0"><div class="offer-name">'+esc(o.title||'Oferta')+'</div>'+
+   '<div class="rp-offer-assurance">'+quality+'</div>'+
+   '<div class="offer-src">'+esc(o.source||'Loja')+' '+(o.provider?'• '+esc(({brightdata:'Bright Data',mercadolivre:'Mercado Livre',serpapi:'SerpApi'})[o.provider]||o.provider):'')+
+   ' • Consulta '+esc(stamp)+'</div>'+
+   '<div class="rp-offer-details">'+metadata+'</div></div>'+
+   '<div><div class="offer-price">'+brl(o.price)+'</div><small style="color:#a4bddb">Anunciado</small>'+
+   '<div class="offer-actions">'+(validUrl?'<a href="'+esc(validUrl)+'" target="_blank" rel="noopener noreferrer">Ir à loja ↗</a>':'')+
+   '<button class="rp-report-button" type="button" data-report="'+i+'" title="Enviar esta oferta para conferência">⚑ Produto errado?</button></div></div></div>';
 }
 function currentOffers(){
  const map=new Map();
@@ -617,7 +661,7 @@ function storeComparison(rows){
  return `<div class="r5-shop-chart" role="img" aria-label="Comparação dos preços por loja">
   ${rows.slice(0,16).map((o,i)=>{
    const val=Number(o.price), width=Math.max(12,(val/hi)*100);
-   return `<div class="r5-offer-row ${i===0?'cheapest':''}"><span class="merchant" title="${esc(o.source||'Loja')}">${esc(o.source||'Loja')}${i===0?'<span class="r5-badge">MENOR</span>':''}</span><div class="bar-bg"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="amount">${brl(val)}</span></div>`;
+   return `<div class="r5-offer-row ${i===0?'cheapest':''}"><span class="merchant" title="${esc(o.source||'Loja')}">${esc(o.source||'Loja')}${i===0?'<span class="r5-badge">MENOR ANUNCIADO</span>':''}</span><div class="bar-bg"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="amount">${brl(val)}</span></div>`;
   }).join('')}
   <div class="r5-status">${rows.length} loja(s) na última consulta • ${esc(stamp)}. Preço anunciado antes de frete e cupons, salvo quando a fonte confirmar o custo de envio.</div><div class="r9-cost">${rows.slice(0,7).map(o=>`${esc(o.source)}: ${o.shipping_price==null?'<span class=\"r9-ship-unknown\">frete não informado</span>':'frete '+brl(o.shipping_price)+' • custo '+brl(Number(o.price)+Number(o.shipping_price))}`).join(' · ')}</div>
  </div>`;
@@ -703,9 +747,10 @@ function renderDetail(){
   <div class="r5-summary"><div class="r5-stat"><label>Menor oferta</label><b id="lowPrice">${low!=null?brl(low):'—'}</b></div><div class="r5-stat"><label>Maior oferta</label><b id="highPrice">${high!=null?brl(high):'—'}</b></div><div class="r5-stat"><label>Diferença entre lojas</label><b id="priceSpread">${savings!=null?brl(savings):'—'}</b></div></div>
   <div class="sectiontitle r5-list-title">🏬 Preço em cada loja ${valid.length?`(${valid.length})`:''}</div>
   ${storeComparison(valid)}
+   <div class="rp-audit-note"><strong>Como verificamos:</strong> modelo e variante comparados ao título do anúncio. O código GTIN/EAN ainda não é confirmado pelas fontes. Produtos com identificação insuficiente não entram no menor preço nem no gráfico. Frete, Pix e parcelas são mostrados somente quando informados.</div>
   <div class="sectiontitle graph-head r4-graph-head"><span>📈 Evolução dos preços por loja</span><div class="timefilters">${[[7,'7 dias'],[30,'30 dias'],[90,'90 dias'],[365,'1 ano'],['all','Tudo']].map(([v,n])=>`<button data-period="${v}" class="${String(chartPeriod)===String(v)?'active':''}">${n}</button>`).join('')}</div></div>
   <div class="r4-period-info">${chartPeriod==='all'?'Todos os registros':`Últimos ${chartPeriod} dias`} • ${obs.filter(x=>chartPeriod==='all'||new Date(x.at).getTime()>=Date.now()-Number(chartPeriod)*86400000).length} cotação(ões) ${loading?'• atualizando…':''}</div>
-  <div class="chart r4-chart">${graph(obs)}</div>
+  <div class="chart r4-chart">${graph(obs)}</div><div class="rp-evidence">Registros distintos no gráfico: ${obs.length} • dias com registros: ${new Set(obs.map(p=>String(p.at||'').slice(0,10))).size}. Curvas mostram apenas observações realmente armazenadas, não previsões.</div>
   <div class="r4-trend">${trendText(obs.filter(x=>chartPeriod==='all'||new Date(x.at).getTime()>=Date.now()-Number(chartPeriod)*86400000))}</div>
   ${alertMarkup()}
   <div class="detail-actions"><button class="action ${mine?'good':''}" id="trackBtn">${mine?'✓ Acompanhando':'☆ Acompanhar'}</button>${provider?'<button class="action mainbutton" id="integratedBtn">↻ Atualizar preços das lojas</button>':''}</div>
@@ -854,7 +899,7 @@ $('savedBtn').addEventListener('click',()=>{onlySaved=true;cat='Todos';subcat='T
 $('allBtn').addEventListener('click',()=>{onlySaved=false;cat='Todos';subcat='Todas';term='';$('q').value='';limit=45;render()});
 $('sort').addEventListener('change',e=>{sort=e.target.value;renderList()});
 $('detail').addEventListener('change',async e=>{if(e.target.id==='dropThreshold'){const ok=await watchRequest('set',{product:queryFor(selection),threshold:Number(e.target.value)});if(ok){if(!persist.saved.includes(selection)){persist.saved.unshift(selection);save();renderStats()}toast('Percentual de alerta atualizado.')}else toast(watchWarning);renderDetail()}});
-$('detail').addEventListener('click',e=>{const v6=e.target.closest('[data-variant]');if(v6){variantS24=v6.dataset.variant;choose(selection);return}if(e.target.closest('#trackBtn')){track();return}if(e.target.closest('#integratedBtn')){refreshProduct(selection);return}const v=e.target.closest('[data-period]');if(v){chartPeriod=v.dataset.period==='all'?'all':Number(v.dataset.period);renderDetail();return}const b=e.target.closest('[data-observe]');if(b){const o=offers[Number(b.dataset.observe)];if(o){addObserved(selection,o.price,o.source||'Busca integrada',o.url);return}}});
+$('detail').addEventListener('click',e=>{const v6=e.target.closest('[data-variant]');if(v6){variantS24=v6.dataset.variant;choose(selection);return}if(e.target.closest('#trackBtn')){track();return}if(e.target.closest('#integratedBtn')){refreshProduct(selection);return}const v=e.target.closest('[data-period]');if(v){chartPeriod=v.dataset.period==='all'?'all':Number(v.dataset.period);renderDetail();return}const bad=e.target.closest('[data-report]');if(bad){const o=currentOffers()[Number(bad.dataset.report)];if(!o){toast('Oferta indisponível.');return}bad.disabled=true;bad.textContent='Enviando…';fetch('/api/report-offer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product:queryFor(selection),merchant:o.source,reason:'modelo_incorreto'})}).then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.error||'Não foi possível enviar.');toast('Obrigado! Oferta registrada para revisão.');bad.textContent='✓ Revisão solicitada'}).catch(e=>{bad.disabled=false;bad.textContent='⚑ Produto errado?';toast(e.message)});return}});
 $('detail').addEventListener('submit',e=>{if(e.target.id!=='manualForm')return;e.preventDefault();const d=new FormData(e.target),p=Number(d.get('price'));if(!Number.isFinite(p)||p<0){toast('Digite um valor válido.');return}addObserved(selection,p,String(d.get('source')||'Registro do usuário'))});
 $('exportBtn').addEventListener('click',exportCSV);
 $('alertsBtn').addEventListener('click',async()=>{
@@ -885,6 +930,7 @@ window.RadarPrecoTest={get queried(){return queryFor(selection)},get total(){ret
 </script>
 <script src="/photo-discovery.js?v=15" defer></script>
 <script defer src="/ui-refresh.js?v=12.0"></script>
+<script defer src="/search-experience.js?v=16"></script>
 <script id="rp14-script">/* RadarPreço v14 — optional quality-of-life interactions. Uses existing real-data backend. */
 (()=>{
   'use strict';
