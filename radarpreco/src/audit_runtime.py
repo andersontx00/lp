@@ -23,6 +23,12 @@ def init_schema(cn,postgres=False):
        duration_ms INTEGER NOT NULL, request_units INTEGER NOT NULL,
        returned_offers INTEGER NOT NULL)""")
     cn.execute('CREATE INDEX IF NOT EXISTS usage_by_date ON provider_usage(checked_at,source)')
+    cn.execute("""CREATE TABLE IF NOT EXISTS offer_audit_decisions (
+        audit_id BIGINT PRIMARY KEY, action TEXT NOT NULL, note TEXT NOT NULL,
+        decided_at TEXT NOT NULL)""")
+    cn.execute("""CREATE TABLE IF NOT EXISTS collection_attempts (
+        product TEXT PRIMARY KEY, last_attempt TEXT NOT NULL,
+        retry_after TEXT NOT NULL, status TEXT NOT NULL)""")
 
 def record_audit(cn,name,row,status,reason,variant):
     cn.execute('''INSERT INTO offer_audit_events
@@ -72,3 +78,41 @@ def usage(cn):
          FROM provider_usage WHERE checked_at>=?
          GROUP BY source,status ORDER BY source,status""",(month,)).fetchall()
     return [dict(x) for x in rows]
+
+def resolve_pending(cn,audit_id,action,note):
+    """Record a decision without promoting an unverified listing to a live offer."""
+    if action not in ('reject','recheck'):
+        raise ValueError('Ação de auditoria inválida.')
+    if not isinstance(audit_id,int) or audit_id<1:
+        raise ValueError('Identificador inválido.')
+    note=str(note or '').strip()
+    if not 8<=len(note)<=300:
+        raise ValueError('Justificativa deve ter de 8 a 300 caracteres.')
+    row=cn.execute("SELECT id,status FROM offer_audit_events WHERE id=?",(audit_id,)).fetchone()
+    if not row or row['status']!='pending_review':
+        raise ValueError('Evento pendente não encontrado.')
+    previous=cn.execute('SELECT audit_id FROM offer_audit_decisions WHERE audit_id=?',(audit_id,)).fetchone()
+    if previous:
+        raise ValueError('Evento já revisado.')
+    cn.execute('INSERT INTO offer_audit_decisions(audit_id,action,note,decided_at) VALUES(?,?,?,?)',
+        (audit_id,action,note,datetime.now(timezone.utc).isoformat(timespec='seconds')))
+    return {'audit_id':audit_id,'action':action,'note':note,
+            'published':False,'message':'Decisão registrada; nova coleta é necessária para publicar.'}
+
+def pending_reviews(cn,limit=100):
+    rows=cn.execute("""SELECT a.id,a.product,a.merchant,a.variant_key,a.title,
+        a.price,a.reason,a.checked_at
+        FROM offer_audit_events a LEFT JOIN offer_audit_decisions d ON d.audit_id=a.id
+        WHERE a.status='pending_review' AND d.audit_id IS NULL
+        ORDER BY a.id DESC LIMIT ?""",(min(100,max(1,int(limit))),)).fetchall()
+    return [dict(r) for r in rows]
+
+def record_collection_attempt(cn,product,status,retry_minutes=120):
+    """Keep retries durable; a failure must not be recorded as a successful scan."""
+    now=datetime.now(timezone.utc)
+    from datetime import timedelta
+    retry=(now+timedelta(minutes=retry_minutes)).isoformat(timespec='seconds')
+    cn.execute("""INSERT INTO collection_attempts(product,last_attempt,retry_after,status)
+        VALUES(?,?,?,?) ON CONFLICT(product) DO UPDATE SET
+        last_attempt=excluded.last_attempt,retry_after=excluded.retry_after,status=excluded.status""",
+        (product,now.isoformat(timespec='seconds'),retry,str(status)[:30]))
