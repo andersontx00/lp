@@ -875,13 +875,11 @@ class Handler(BaseHTTPRequestHandler):
             with lock,db_conn() as cn:
                 report_rows=cn.execute("""SELECT product,merchant,title,reason,created_at
                     FROM offer_reports ORDER BY id DESC LIMIT 100""").fetchall()
-                pending=cn.execute("""SELECT product,merchant,variant_key,title,price,reason,checked_at
-                    FROM offer_audit_events WHERE status='pending_review'
-                    ORDER BY id DESC LIMIT 100""").fetchall()
+                pending=audit_runtime.pending_reviews(cn)
                 self.respond({'audit':audit_runtime.summary(cn),
                     'provider_usage':audit_runtime.usage(cn),
                     'reports':[dict(x) for x in report_rows],
-                    'pending':[dict(x) for x in pending],
+                    'pending':pending,
                     'pricing_note':'Consumo em requisições. Tarifas reais dependem do contrato com cada API.'})
             return
         if path.path=='/api/status':
@@ -902,6 +900,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path=urlsplit(self.path)
         if not self.safe_origin():self.respond({'error':'Origem não autorizada.'},403);return
+        if path.path=='/api/admin/audit/review':
+            import secrets
+            expected=os.environ.get('RADAR_ADMIN_KEY','')
+            supplied=self.headers.get('X-Radar-Admin-Key','')
+            if not expected or not secrets.compare_digest(supplied,expected):
+                self.respond({'error':'Rota indisponível.'},404);return
+            if self.headers.get('Content-Type','').split(';')[0].strip().lower()!='application/json':
+                self.respond({'error':'JSON obrigatório.'},415);return
+            try:
+                body=self.request_json(1200)
+                audit_id=body.get('audit_id')
+                if isinstance(audit_id,bool) or not isinstance(audit_id,int):
+                    raise ValueError('ID de auditoria inválido.')
+                with lock,db_conn() as cn:
+                    outcome=audit_runtime.resolve_pending(cn,audit_id,body.get('action'),body.get('note'))
+                self.respond(outcome)
+            except (ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+                self.respond({'error':str(exc) if isinstance(exc,ValueError) else 'Entrada inválida.'},400)
+            except Exception:
+                self.respond({'error':'Não foi possível registrar a decisão.'},503)
+            return
         if path.path=='/api/report-offer':
             try:
                 body=self.request_json(1800)
@@ -1019,13 +1038,21 @@ def automatic_watch_loop():
         try:
             with lock,db_conn() as cn:
                 name=alerts_engine.next_due_product(cn)
-                if name:alerts_engine.mark_scanned(cn,name,timestamp())
             if not name:continue
             completed+=1
             result=perform_refresh(name,'automatic')
-            print('AUTO_WATCH status=%s' % ('ok' if result.get('offers') else 'no_offers'),flush=True)
+            status=('pending' if result.get('pending') else
+                    'error' if result.get('errors') else
+                    'cached' if result.get('cached') else
+                    'ok' if result.get('offers') else 'empty')
+            with lock,db_conn() as cn:
+                audit_runtime.record_collection_attempt(cn,name,status,
+                    retry_minutes=15 if status=='pending' else 120)
+                if status=='ok':
+                    alerts_engine.mark_scanned(cn,name,timestamp())
+            print('AUTO_WATCH status=%s' % status,flush=True)
         except ValueError:
-            # Quota reached; do not retry until tomorrow.
+            # Quota reached; preserve the remaining daily budget for user searches.
             completed=2
         except Exception as exc:
             print('AUTO_WATCH error_type=%s' % type(exc).__name__,flush=True)
