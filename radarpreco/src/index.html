@@ -479,7 +479,7 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const brl=v=>v==null?'—':new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(v));
 const cats=[...new Set(products.map(p=>p.category))];const countByCat=new Map(cats.map(c=>[c,products.filter(p=>p.category===c).length]));
 function load(){try{let s=JSON.parse(localStorage.getItem(storeKey)||'{}');return {saved:Array.isArray(s.saved)?s.saved:[],observations:s.observations&&typeof s.observations==='object'?s.observations:{},custom:Array.isArray(s.custom)?s.custom:[]}}catch(e){return {saved:[],observations:{},custom:[]}}}
-let pollTimer=null,pollCount=0,apiSources=[];let variantS24='256GB';const photoCache=new Map(),catalogQuotes=new Map();const knownProductPhotos={'Samsung Galaxy S24 FE':'https://mobileplanet.ua/uploads/product/2024-10-9/samsung-galaxy-s24-fe-8-256gb-blue-sm-s7-324906.webp','Logitech G305 LIGHTSPEED':'https://cdn.mwave.com.au/images/400/logitech_g305_lightspeed_wireless_gaming_mouse_black_ac37722_4.jpg'};let insight=null,watchList=[],feedAlerts=[],unreadAlerts=0,watchWarning='';
+let pollTimer=null,pollCount=0,apiSources=[],availableVariants=[];let offerSortMode='announced';let variantS24='256GB';const photoCache=new Map(),catalogQuotes=new Map();const knownProductPhotos={'Samsung Galaxy S24 FE':'https://mobileplanet.ua/uploads/product/2024-10-9/samsung-galaxy-s24-fe-8-256gb-blue-sm-s7-324906.webp','Logitech G305 LIGHTSPEED':'https://cdn.mwave.com.au/images/400/logitech_g305_lightspeed_wireless_gaming_mouse_black_ac37722_4.jpg'};let insight=null,watchList=[],feedAlerts=[],unreadAlerts=0,watchWarning='';
 let persist=load();let cat='Todos',subcat='Todas',term='',sort='popular',onlySaved=false,onlyPriced=false,limit=45,selection='Logitech G305 LIGHTSPEED',provider=false,serverReady=false,offers=[],loading=false,chartPeriod=7,remoteHistory=[],remoteLatest=null,fetchMessage='',viewToken=0;
 const quoteCache=new Map();
 let accountUser=null,csrfToken='',accountLoaded=false;let notifiedAlertIds=new Set();
@@ -643,12 +643,43 @@ function offerHTML(o,i){
    '<div class="offer-actions">'+(validUrl?'<a href="'+esc(validUrl)+'" target="_blank" rel="noopener noreferrer">Ir à loja ↗</a>':'')+
    '<button class="rp-report-button" type="button" data-report="'+i+'" title="Enviar esta oferta para conferência">⚑ Produto errado?</button></div></div></div>';
 }
+function orderedOffers(items){
+ const a=[...items];
+ if(offerSortMode==='total')a.sort((x,y)=>(x.total_known==null?Infinity:Number(x.total_known))-(y.total_known==null?Infinity:Number(y.total_known))||Number(x.price)-Number(y.price));
+ else if(offerSortMode==='pix')a.sort((x,y)=>(x.pix_price==null?Infinity:Number(x.pix_price))-(y.pix_price==null?Infinity:Number(y.pix_price))||Number(x.price)-Number(y.price));
+ return a;
+}
+function variantFilterQuery(base,key){
+ const parts=String(key||'').split('|').map(item=>{
+  const [kind,value]=item.split('=');
+  if(kind==='shoe_size')return ' tamanho '+value;
+  if(kind==='color')return ' '+value;
+  if(kind==='storage'||kind==='voltage')return ' '+value;
+  return '';
+ });
+ return base+parts.join('');
+}
+function marketStats(points){
+ const recent=chartPeriod==='all'?points:points.filter(p=>Date.parse(p.at)>=Date.now()-Number(chartPeriod)*86400000);
+ const valid=recent.filter(p=>Number(p.price)>0&&Number.isFinite(Date.parse(p.at)));
+ const daily=new Map(),series=new Set();
+ for(const p of valid){
+  const date=String(p.at).slice(0,10);
+  daily.set(date,Math.min(Number(p.price),daily.get(date)??Infinity));
+  series.add(String(p.series||''));
+ }
+ const prices=[...daily.values()].sort((a,b)=>a-b);
+ const n=prices.length,median=n?(n%2?prices[(n-1)/2]:(prices[n/2-1]+prices[n/2])/2):null;
+ const dates=[...daily.keys()].sort(),first=dates[0]||null,last=dates.at(-1)||null;
+ const gaps=n>1?Math.max(0,Math.round((Date.parse(last)-Date.parse(first))/86400000)+1-n):0;
+ return {observations:valid.length,days:n,series:series.size,median,min:n?prices[0]:null,max:n?prices.at(-1):null,gaps,first,last};
+}
 function currentOffers(){
  const map=new Map();
  for(const o of offers){
   if(!o || !Number.isFinite(Number(o.price)) || Number(o.price)<=0)continue;
   const source=String(o.source||'Loja não informada').trim();
-  const k=norm(source);
+  const k=norm(source)+'|'+String(o.variant_key||'sem-variante-informada');
   if(!map.has(k)||Number(o.price)<Number(map.get(k).price))map.set(k,o);
  }
  return [...map.values()].sort((a,b)=>Number(a.price)-Number(b.price));
@@ -677,6 +708,7 @@ const deviceKey=(()=>{
   }catch(e){return null}
 })();
 function watchThreshold(){const entry=watchList.find(w=>w.product===queryFor(selection));return entry?Number(entry.threshold):10}
+function watchTarget(){const entry=watchList.find(w=>w.product===queryFor(selection));return entry?.target_price==null?'':Number(entry.target_price)}
 function watchActive(){return watchList.some(w=>w.product===queryFor(selection))}
 function setWatchState(d){
  watchList=Array.isArray(d.watches)?d.watches:[];
