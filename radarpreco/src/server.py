@@ -846,6 +846,12 @@ def run_smoke_query():
         print('RADAR_SMOKE status=error category='+type(exc).__name__,flush=True)
 
 def main():
+    if os.environ.get('RADAR_MATCH_SELFTEST')=='1':
+        import matching_selftest
+        checks=matching_selftest.run(match_score,extract_offers,product_identity.canonical_query,ROOT/'catalog.json')
+        print('RADAR_IDENTITY_TEST passed=%d cross_catalog_matches=%d examples=%s' %
+              (checks['passed_cases'],checks['cross_catalog_matches'],
+               repr(checks['cross_catalog_examples'][:5])),flush=True)
     initialize();app=ThreadingHTTPServer((HOST,PORT),Handler)
     print('RadarPreço 10.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
     threading.Thread(target=automatic_watch_loop,daemon=True).start()
