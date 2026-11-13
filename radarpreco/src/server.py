@@ -738,7 +738,7 @@ def highlights(limit=12):
     return [price_assurance.enrich({**o,'variant_label':variant_identity.describe(o.get('product',''),o.get('title',''))}) for o in sorted(found.values(),key=lambda o:o['price'])[:limit]]
 
 class Handler(BaseHTTPRequestHandler):
-    server_version='RadarPreco/10.1'
+    server_version='RadarPreco/16.0'
     def log_message(self,fmt,*args):pass # prevent query/key logging
     def client_session(self):
         import http.cookies
@@ -1063,7 +1063,7 @@ def main():
               (checks['passed_cases'],checks['cross_catalog_matches'],
                repr(checks['cross_catalog_examples'][:60])),flush=True)
     initialize();app=ThreadingHTTPServer((HOST,PORT),Handler)
-    print('RadarPreço 10.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
+    print('RadarPreço 16.0 em http://%s:%d | Bright Data %s | Mercado Livre %s | SerpApi %s' % (HOST,PORT, 'ON' if BRIGHTDATA_API_TOKEN else 'OFF','ON' if MELI_ACCESS_TOKEN else 'OFF','ON' if SERPAPI_KEY else 'OFF'))
     threading.Thread(target=automatic_watch_loop,daemon=True).start()
     if os.environ.get('RADAR_SMOKE_QUERY','').strip():
         threading.Thread(target=run_smoke_query,daemon=True).start()
