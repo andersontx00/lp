@@ -508,6 +508,29 @@ def record_merged(name,new_offers,stamp=None):
          'kind':'snapshot'} for o in accepted if o.get('price')])
     return read_offers(name)
 
+def metered_provider_call(source,name,call,*args):
+    """Count API requests, not estimated invoices, with source-specific timing."""
+    start=time.monotonic()
+    status='ok'
+    returned=0
+    try:
+        result=call(*args)
+        if isinstance(result,list):returned=len(result)
+        if isinstance(result,dict):returned=len(result.get('results') or result.get('shopping_results') or [])
+        return result
+    except Exception:
+        status='error'
+        raise
+    finally:
+        elapsed=int((time.monotonic()-start)*1000)
+        try:
+            with lock,db_conn() as cn:
+                audit_runtime.log_provider(cn,source,status,name,elapsed,
+                    0 if source=='brightdata-poll' else 1,returned)
+        except Exception as exc:
+            print('PROVIDER_METRICS_ERROR type='+type(exc).__name__,flush=True)
+
+
 def configured():
     return bool(BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN or SERPAPI_KEY or KEEPA_KEY)
 
@@ -525,7 +548,7 @@ def poll_bright(name):
     if datetime.now(timezone.utc)-created>timedelta(hours=2):
         job_clear(name);return ('expired',[])
     job_mark_checked(name)
-    state,body=providers.read_bright(job['snapshot_id'],BRIGHTDATA_API_TOKEN)
+    state,body=metered_provider_call('brightdata-poll',name,providers.read_bright,job['snapshot_id'],BRIGHTDATA_API_TOKEN)
     if state=='pending':return ('pending',[])
     job_clear(name)
     if state=='ready':
@@ -611,9 +634,9 @@ def perform_refresh(name,owner='anonymous'):
     with ThreadPoolExecutor(max_workers=2) as pool:
         work={}
         if BRIGHTDATA_API_TOKEN:
-            work[pool.submit(providers.trigger_bright,name,BRIGHTDATA_API_TOKEN,BRIGHTDATA_DATASET_ID)]='brightdata'
+            work[pool.submit(metered_provider_call,'brightdata',name,providers.trigger_bright,name,BRIGHTDATA_API_TOKEN,BRIGHTDATA_DATASET_ID)]='brightdata'
         if MELI_ACCESS_TOKEN:
-            work[pool.submit(providers.search_meli,name,MELI_ACCESS_TOKEN)]='mercadolivre'
+            work[pool.submit(metered_provider_call,'mercadolivre',name,providers.search_meli,name,MELI_ACCESS_TOKEN)]='mercadolivre'
         for task in as_completed(work):
             provider_name=work[task]
             try:
@@ -635,7 +658,7 @@ def perform_refresh(name,owner='anonymous'):
     # data and Bright Data is not pending; this avoids unnecessary charged searches.
     if SERPAPI_KEY and not out['offers'] and not out['pending']:
         try:
-            rows=shopping_search(name)
+            rows=metered_provider_call('serpapi',name,shopping_search,name)
             for row in rows:row['provider']='serpapi'
             if rows:out['offers']=record_merged(name,rows,out['checked_at'])
             out['sources'].append({'name':'SerpApi','status':'ok' if rows else 'empty'})
@@ -811,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.path=='/api/catalog-cards':
             self.respond({'items':catalog_cards(),'source':'stored_verified_offers','no_billable_queries':True});return
         if path.path=='/api/highlights':
-            self.respond({'offers':highlights(),'note':'Somente ofertas realmente verificadas nas últimas 24 horas.'});return
+            self.respond({'offers':highlights(),'note':'Somente anúncios aprovados pelo validador nas últimas 24 horas.'});return
         if path.path=='/favicon.svg' or path.path in ('/icon-192.png','/icon-512.png'):
             file=ROOT/path.path.lstrip('/')
             raw=file.read_bytes()
@@ -837,14 +860,33 @@ class Handler(BaseHTTPRequestHandler):
         if path.path=='/sw.js':
             raw=(ROOT/'sw.js').read_bytes()
             self.send_response(200);self.send_header('Content-Type','text/javascript');self.send_header('Service-Worker-Allowed','/');self.send_header('Cache-Control','no-cache');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
+        if path.path=='/api/admin/audit':
+            import secrets
+            expected=os.environ.get('RADAR_ADMIN_KEY','')
+            supplied=self.headers.get('X-Radar-Admin-Key','')
+            if not expected or not secrets.compare_digest(supplied,expected):
+                self.respond({'error':'Rota indisponível.'},404);return
+            with lock,db_conn() as cn:
+                report_rows=cn.execute("""SELECT product,merchant,title,reason,created_at
+                    FROM offer_reports ORDER BY id DESC LIMIT 100""").fetchall()
+                pending=cn.execute("""SELECT product,merchant,variant_key,title,price,reason,checked_at
+                    FROM offer_audit_events WHERE status='pending_review'
+                    ORDER BY id DESC LIMIT 100""").fetchall()
+                self.respond({'audit':audit_runtime.summary(cn),
+                    'provider_usage':audit_runtime.usage(cn),
+                    'reports':[dict(x) for x in report_rows],
+                    'pending':[dict(x) for x in pending],
+                    'pricing_note':'Consumo em requisições. Tarifas reais dependem do contrato com cada API.'})
+            return
         if path.path=='/api/status':
-            self.respond({'version':'12.0','smoke_test':dict(smoke_state),'connected':configured(),
+            self.respond({'version':'16.0','smoke_test':dict(smoke_state),'connected':configured(),
              'shopping':bool(SERPAPI_KEY or BRIGHTDATA_API_TOKEN or MELI_ACCESS_TOKEN),
              'brightdata':bool(BRIGHTDATA_API_TOKEN),'mercadolivre':bool(MELI_ACCESS_TOKEN),
              'serpapi_fallback':bool(SERPAPI_KEY),'coverage':'on_demand_and_opportunistic_background','catalog_items':1000,'automatic_checks':True,'checks_best_effort':True,'automatic_daily_cap':2,'storage':'postgres' if USE_POSTGRES else 'temporary_sqlite','auth':'email_password',
              'historical_google':bool(SERPAPI_KEY),'historical_amazon':bool(KEEPA_KEY),
              'history_note':'Histórico anterior depende de cobertura do provedor. Não são gerados preços simulados.',
-              'quality_policy':'Somente anúncios identificados pelo título; código GTIN não confirmado.'});return
+              'quality_policy':'Modelos, variantes e anomalias revisados internamente; GTIN externo ainda não confirmado.',
+               'shipping_by_cep_enabled':False,'admin_audit_requires_key':True});return
         if path.path=='/api/history':
             try:name=clean_query((parse_qs(path.query).get('q') or [''])[0])
             except ValueError as e:self.respond({'error':str(e)},400);return
@@ -932,7 +974,7 @@ class Handler(BaseHTTPRequestHandler):
                         alerts_engine.mark_read(cn,device,body.get('id','all'),timestamp())
                     else:
                         name=clean_query(body.get('product',''))
-                        alerts_engine.change_watch(cn,device,name,action,body.get('threshold',10),timestamp())
+                        alerts_engine.change_watch(cn,device,name,action,body.get('threshold',10),timestamp(),body.get('target_price'))
                     state=alerts_engine.watch_state(cn,device)
                 self.respond(state)
             except (ValueError,TypeError,KeyError,json.JSONDecodeError) as e:
